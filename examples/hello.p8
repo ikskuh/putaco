@@ -35,10 +35,9 @@ write_l1:
     JMP  write_out
 
 write_o:
-    SET  'o'
-    ST   write_data
     SET  write_bang
     ST   ret_addr
+    SET  'o'
     JMP  write_out
 
 write_bang:

@@ -119,6 +119,13 @@ pub const simulator = struct {
         }
     };
 
+    pub const Result = enum {
+        seeking,
+        waiting,
+        executing,
+        halt,
+    };
+
     pub const Simulator = struct {
         const State = enum {
             fetch_instr,
@@ -145,7 +152,7 @@ pub const simulator = struct {
         acc: u8 = 0,
         seek: LabelWord = .zero,
 
-        pub fn step(sim: *Simulator, mem: MemoryInterface, code: CodeWord) void {
+        pub fn step(sim: *Simulator, mem: MemoryInterface, code: CodeWord) Result {
             if (code.label.label and sim.seek == code.label) {
                 // The the new code word is the label we seek,
                 // we leave seek mode:
@@ -154,14 +161,15 @@ pub const simulator = struct {
 
             // CPU is seeking a specific location:
             if (sim.seek.label) {
-                return;
+                return .seeking;
             }
 
             // CPU does not execute labels:
             if (code.label.label) {
-                return;
+                return .waiting;
             }
 
+            var result: Result = .waiting;
             sim.state = exc: switch (sim.state) {
                 .fetch_instr => {
                     sim.instr = code.instruction;
@@ -185,8 +193,9 @@ pub const simulator = struct {
                 },
 
                 .execute => {
+                    result = .executing;
                     switch (sim.instr.opcode) {
-                        .halt => @panic("halt not implemented yet"),
+                        .halt => result = .halt,
                         .set => {
                             sim.acc = sim.op;
                         },
@@ -232,6 +241,7 @@ pub const simulator = struct {
                     break :exc .fetch_instr;
                 },
             };
+            return result;
         }
     };
 };
