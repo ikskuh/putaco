@@ -14,6 +14,7 @@
    - computation speed: km/h
    - program size: m²
    - run length: km
+2. You want to write a compiler which needs to consider the aerodynamic and mechanic properties of a program.
 
 ## Concept
 

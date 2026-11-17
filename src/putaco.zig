@@ -221,7 +221,7 @@ pub const simulator = struct {
                         },
                         .djnz => {
                             sim.acc -= 1;
-                            if (sim.acc == 0) {
+                            if (sim.acc != 0) {
                                 sim.seek = .{ .branch_id = @truncate(sim.op) };
                             }
                         },

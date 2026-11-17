@@ -61,7 +61,7 @@ stop:
 write_out:
     ST   write_data
 .loop:
-    ; wait until FIFO is empty (TXE unset)
+    ; wait until FIFO is empty (TXE set)
     LD   IO_STATUS
     AND  TXE
     JZ   .loop

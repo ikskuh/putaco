@@ -12,7 +12,25 @@ pub fn main(init: std.process.Init) !void {
 
     const program = try std.Io.Dir.cwd().readFileAlloc(init.io, filename, init.arena.allocator(), .limited(1 << 20));
 
-    var mem: Memory = .{};
+    const stdin: []const u8 = blk: {
+        if (try std.Io.File.stdin().isTty(init.io)) {
+            std.log.warn("cannot read data from tty. redirect stdin!", .{});
+            break :blk "";
+        }
+
+        var writer: std.Io.Writer.Allocating = .init(init.arena.allocator());
+
+        var buffer: [4096]u8 = undefined;
+        var reader = std.Io.File.stdin().reader(init.io, &buffer);
+
+        _ = try reader.interface.streamRemaining(&writer.writer);
+
+        break :blk writer.written();
+    };
+
+    var mem: Memory = .{
+        .input_data = stdin,
+    };
 
     var sim: putaco.simulator.Simulator = .{};
 
@@ -30,6 +48,8 @@ pub fn main(init: std.process.Init) !void {
                 .executing => stat_executing +|= 1,
             }
         }
+
+        try std.Io.sleep(init.io, .fromMilliseconds(100), .awake);
     }
 
     const total = stat_seeking +| stat_waiting +| stat_executing;
@@ -83,6 +103,8 @@ const Memory = struct {
     bank0: u8 = 0,
     bank1: u8 = 0,
 
+    input_data: []const u8,
+
     fn interface(mem: *Memory) putaco.simulator.MemoryInterface {
         return .{
             .context = mem,
@@ -91,11 +113,20 @@ const Memory = struct {
         };
     }
 
+    fn pop_input_byte(mem: *Memory) ?u8 {
+        if (mem.input_data.len == 0)
+            return null;
+
+        const head = mem.input_data[0];
+        mem.input_data = mem.input_data[1..];
+        return head;
+    }
+
     fn read_mmio(mem: *Memory, addr: MmioAddress) u8 {
         return switch (addr) {
-            .data => 0x00, // TODO
+            .data => mem.pop_input_byte() orelse 0x00,
             .status => @backingInt(IoStatus{
-                .rxf = false,
+                .rxf = mem.input_data.len > 0,
                 .txe = true,
                 .@"suspend" = false,
                 .configured = true,
