@@ -1,0 +1,73 @@
+
+Interface:
+    Code Interface:
+        - input   CODE.DATA[6:0]
+        - input   CODE.STROBE      (* pulse input *)
+        - output  CODE.LABEL[6:0]
+        - output  CODE.SEEK        (* pulse output *)
+        - output  CODE.HALT        (* pulse output *)
+
+    Memory Interface:
+        - inout  MEM.ADDR[7:0]
+        - output MEM.DATA[7:0]
+        - output MEM.CS
+        - output MEM.OE
+        - output MEM.WE
+
+High-Level Components:
+    IR[5:0]:  6 bit, Instruction Register
+    OP[7:0]:  8 bit, Opcode Register
+    ACC[7:0]: 8 bit, Accumulator Register
+    ALU:      8 bit ROM with 19 bit addressing.
+
+Data Movements + State Machine:
+    state[fetch instruction]:
+        when[CODE.STROBE]:
+            IR <= CODE.DATA
+            goto state[fetch operand]
+    state[fetch operand]:
+        when[CODE.STROBE]:
+            OP <= { IR[5], CODE.DATA }
+            goto IR[4] ? state[indirect operand] : state[execute]
+    state[indirect operand]:
+        MEM.CS   <= 1
+        MEM.OE   <= 1
+        MEM.WR   <= 0
+        MEM.ADDR <= OP
+        OP       <= MEM.DATA
+        goto state[execute]
+    state[execute]:
+        if IR[3]:
+            ALU.ADDR <= {IR[2:0], ACC, OP}
+            ALU.OE   <= 1
+            ACC      <= ALU.DATA
+        elif IR[2:0] == 0: (* HALT *)
+            CODE.HALT <= 1 (* emit pulse *)
+        elif IR[2:0] == 1: (* SET *)
+            ACC      <= OP
+        elif IR[2:0] == 2: (* LD *)
+            MEM.CS   <= 1
+            MEM.OE   <= 1
+            MEM.WR   <= 0
+            MEM.ADDR <= OP
+            ACC      <= MEM.DATA
+        elif IR[2:0] == 3: (* ST *)
+            MEM.CS   <= 1
+            MEM.OE   <= 0
+            MEM.WR   <= 1
+            MEM.ADDR <= OP
+            MEM.DATA <= ACC
+        elif IR[2]:
+            CODE.LABEL <= OP;
+            if IR[1:0] == 0: (* JMP *)
+                CODE.STROBE <= 1                   (* always emit pulse *)
+            elif IR[1:0] == 1: (* JZ *)
+                CODE.STROBE <= (ACC == 0)          (* emit pulse when zero *)
+            elif IR[1:0] == 2: (* JNZ  *)
+                CODE.STROBE <= (ACC != 0)          (* emit pulse when not zero *)
+            else: (* DJNZ *)
+                CODE.STROBE <= (ACC == 1)          (* emit pulse when going to zero *)
+                ALU.ADDR    <= { 3'b1, ACC, 8'b1 } (* subtract one *)
+                ALU.OE      <= 1
+                ACC         <= ALU.DATA
+            goto state[fetch instruction]

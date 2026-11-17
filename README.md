@@ -2,7 +2,7 @@
 
 ## Overview
 
-- 8-bit harvard architecture
+- 8-bit "harvard" architecture
 - 256 bytes data memory
 - no program counter
 - uses a punch tape as program memory
@@ -53,24 +53,24 @@ and allows arbitrary label codes interleaved.
 
 The CPU implements 16 different operations, 8 of which are arithmetic operations, two memory access and 4 branching.
 
-| Opcode | Name   | Operation              | Description                                                                               |
-| ------ | ------ | ---------------------- | ----------------------------------------------------------------------------------------- |
-| 0      | `halt` |                        | Stops the tape reader.                                                                    |
-| 1      | `set`  | A = op                 | Sets the accumulator to the operand.                                                      |
-| 2      | `ld`   | A = mem[op]            | Loads a byte from memory in the accumulator. Operand is the address.                      |
-| 3      | `st`   | mem[op] = A            | Stores the accumulator to memory. Operand is the address.                                 |
-| 4      | `jmp`  | seek(op)               | Branches to the label given in the operand.                                               |
-| 5      | `jz`   | if(!A) seek(op)        | Branches to the label given in the operand when accumulator is zero.                      |
-| 6      | `jnz`  | if(A) seek(op)         | Branches to the label given in the operand when accumulator is non-zero.                  |
-| 7      | `djnz` | A -= 1; if(A) seek(op) | Decrements the accumulator and branches to the given label when accumulator reaches zero. |
-| 8      | `add`  | A += op                | Adds the operand to the accumulator.                                                      |
-| 9      | `sub`  | A -= op                | Subtracts the operand to the accumulator.                                                 |
-| A      | `and`  | A &= op                | Performs boolean and between accumulator and operand.                                     |
-| B      | `xor`  | A ^= op                | Performs boolean xor between accumulator and operand.                                     |
-| C      | `shl`  | A << op                | Shifts the accumulator left by operand bits Fills in zeroes.                              |
-| D      | `shr`  | A >> op                | Shifts the accumulator right by operand bits. Fills in zeroes.                            |
-| E      | `asr`  | A >>> op               | Shifts the accumulator right by operand bits. Fills in the MSB.                           |
-| F      | `neg`  | A = op - A             | Subtracts the accumulator from the operand.                                               |
+| Opcode | Name   | Operation               | Description                                                                               |
+| ------ | ------ | ----------------------- | ----------------------------------------------------------------------------------------- |
+| 0      | `halt` |                         | Stops the tape reader.                                                                    |
+| 1      | `set`  | A = op                  | Sets the accumulator to the operand.                                                      |
+| 2      | `ld`   | A = mem[op]             | Loads a byte from memory in the accumulator. Operand is the address.                      |
+| 3      | `st`   | mem[op] = A             | Stores the accumulator to memory. Operand is the address.                                 |
+| 4      | `jmp`  | seek(op)                | Branches to the label given in the operand.                                               |
+| 5      | `jz`   | if(!A) seek(op)         | Branches to the label given in the operand when accumulator is zero.                      |
+| 6      | `jnz`  | if(A) seek(op)          | Branches to the label given in the operand when accumulator is non-zero.                  |
+| 7      | `djnz` | A -= 1; if(!A) seek(op) | Decrements the accumulator and branches to the given label when accumulator reaches zero. |
+| 8      | `add`  | A += op                 | Adds the operand to the accumulator.                                                      |
+| 9      | `sub`  | A -= op                 | Subtracts the operand to the accumulator.                                                 |
+| A      | `and`  | A &= op                 | Performs boolean and between accumulator and operand.                                     |
+| B      | `xor`  | A ^= op                 | Performs boolean xor between accumulator and operand.                                     |
+| C      | `shl`  | A << op                 | Shifts the accumulator left by operand bits Fills in zeroes.                              |
+| D      | `shr`  | A >> op                 | Shifts the accumulator right by operand bits. Fills in zeroes.                            |
+| E      | `asr`  | A >>> op                | Shifts the accumulator right by operand bits. Fills in the MSB.                           |
+| F      | `neg`  | A = op - A              | Subtracts the accumulator from the operand.                                               |
 
 ## CPU Logic
 
@@ -139,7 +139,7 @@ Flexible Memory Bank 0 and 1 provide a remappable view for an an arbitrary memor
 
 The low 6 bits of the memory address are taken verbatim from the LSBs of the 8-bit bus address. The upper 8 bit of the memory address are taken from the Bank 0 or Bank 1 MSB register:
 
-```
+```verilog
 ram_address = { bank_reg[mem_addr[6]][7:0], mem_addr[5:0] }
 ```
 
