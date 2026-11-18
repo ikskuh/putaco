@@ -199,10 +199,10 @@ Part Selection:
             B[3:0]
             Y[3:0]
         CD74HC688: 8-Bit Identity/Magnitude Comparators (P=Q) with Enable
-            E#      (* E# high forces Y is low *)
+            E#      (* E# high forces Y=high *)
             A[7:0]
             B[7:0]
-            Y       (* Y high when A==B *)
+            Y#      (* Y low when A==B *)
 
         AS6C4008-55PCN: SRAM - Asynchronous Memory IC 4Mbit Parallel 55 ns 32-PDIP
             A[18:0]
@@ -256,7 +256,7 @@ Part Selection:
         OPCODE_ALU    <= STATE_EX.Q & IR[3]
 
         (* make OPCMUX.Y[] only 'H' when STATE_EX.Q & !IR[3] *)
-        OPCMUX.G0#     <= 'H'
+        OPCMUX.G0#     <= 'L'
         OPCMUX.G1#     <= IR[3]
         OPCMUX.G2      <= STATE_FF.Q[EX]
         OPCMUX.A[2:0]  <= IR[2:0]
@@ -274,7 +274,10 @@ Part Selection:
         AND.B[0]        <= STATE_FF.Q[FO]
 
         STATE_FF.OE#    <= 'L'
+        STATE_FF.OE2#   <= 'L'
         STATE_FF.CLK    <= CLK
+        STATE_FF.E1#    <= 'L'
+        STATE_FF.E2#    <= 'L'
         STATE_FF.D[FI]  <= STATE_FF.Q[EX]
         STATE_FF.D[FO]  <= STATE_FF.Q[FI]
         STATE_FF.D[IO]  <= AND.Y[0]
@@ -283,10 +286,14 @@ Part Selection:
         BUS             <= ALU.DATA ~ MEM.DATA ~ OP_BUF.Q ~ ACC_BUF.Q     (* tristate join *)
 
         IR.D            <= CODE.DATA[5:0]
-        IR.EN           <= STATE_FF.Q[FI]
+        IR.E1#          <= !STATE_FF.Q[FI]
+        IR.E2#          <= 'L'
         IR.CLK          <= CODE.STROBE
+        IR.OE#          <= 'L'
+        IR.OE2#         <= 'L'
 
         OPDMUX[*].A#/B  <= STATE_FF.Q[FO]
+        OPDMUX[*].G#    <= 'L'
         OPDMUX[0].A     <= MEM.DATA[3:0]
         OPDMUX[1].A     <= MEM.DATA[7:4]
         OPDMUX[0].B     <= CODE.DATA[3:0]
@@ -296,6 +303,8 @@ Part Selection:
         OP.E1#          <= !(STATE_FF.Q[FO] | STATE_FF.Q[IO])
         OP.E2#          <= 'L'
         OP.CLK          <= CLK
+        OP.OE#          <= 'L'
+        OP.OE2#         <= 'L'
 
         OP_BUF.D        <= OP.Q
         OP_BUF.OE#      <= !OPCODE_SET
@@ -305,6 +314,8 @@ Part Selection:
         ACC.E1#         <= !(OPCODE_ALU | OPCODE_SET | OPCODE_LD | OPCODE_DJNZ)
         ACC.E2#         <= 'L'
         ACC.CLK         <= CLK
+        ACC.OE#         <= 'L'
+        ACC.OE2#        <= 'L'
 
         ACC_BUF.D       <= ACC.Q
         ACC_BUF.OE#     <= !OPCODE_ST
@@ -324,20 +335,25 @@ Part Selection:
         ALU.A[15: 8]    <= ACC.Q
         ALU.A[ 7: 0]    <= ALUMUX[0].Y[7:0] ~ R'LLLLLLLH'   (* buffer + resistor bias => mux 2:1 *)
         ALU.OE#         <= !(OPCODE_ALU | OPCODE_DJNZ)
+        ALU.CS#         <= 'L'
+        ALU.WE#         <= 'H'
 
         EQ0.A           <= ACC.Q
         EQ0.B           <= 'LLLLLLLL'
+        EQ0.E#          <= 'L'
+
         EQ1.A           <= ACC.Q
         EQ1.B           <= 'LLLLLLLH'
+        EQ1.E#          <= 'L'
 
         AND.A[1]        <= OPCODE_JZ
-        AND.B[1]        <= EQ0.Y
+        AND.B[1]        <= !EQ0.Y#
 
         AND.A[2]        <= OPCODE_JNZ
-        AND.B[2]        <= !EQ0.Y
+        AND.B[2]        <= EQ0.Y#
 
         AND.A[3]        <= OPCODE_DJNZ
-        AND.B[3]        <= !EQ1.Y
+        AND.B[3]        <= EQ1.Y#
 
         CODE.LABEL      <= OP[6:0]
         CODE.SEEK       <= OPCODE_JMP | AND.Y[1] | AND.Y[2] | AND.Y[3]
