@@ -66,7 +66,7 @@ Data Movements + State Machine:
             elif IR[1:0] == 2: (* JNZ  *)
                 CODE.SEEK <= (ACC != 0)          (* emit pulse when not zero *)
             else: (* DJNZ *)
-                CODE.SEEK <= (ACC != 1)          (* emit pulse when going to zero *)
+                CODE.SEEK <= (ACC != 1)          (* emit pulse when not going to zero *)
                 ALU.ADDR  <= { 3'b1, ACC, 8'b1 } (* subtract one *)
                 ALU.OE    <= 1
                 ACC       <= ALU.DATA
@@ -129,14 +129,16 @@ Logic Formules and State Sequencing:
         OP.CLK        <= CLK
 
         OP_BUF.D      <= OP.Q
-        OP_BUF.OE     <= OPCODE_SET
+        OP_BUF.OE#    <= !OPCODE_SET
+        OP_BUF.OE2#   <= 'L'
 
         ACC.D         <= BUS
         ACC.EN        <= OPCODE_ALU | OPCODE_SET | OPCODE_LD | OPCODE_DJNZ
         ACC.CLK       <= CLK
 
         ACC_BUF.D     <= ACC.Q
-        ACC_BUF.OE    <= OPCODE_ST
+        ACC_BUF.OE#   <= !OPCODE_ST
+        ACC_BUF.OE2#  <= 'L'
 
         MEM.CS        <= STATE_IO.Q | OPCODE_LD | OPCODE_ST
         MEM.OE        <= STATE_IO.Q | OPCODE_LD
@@ -149,3 +151,194 @@ Logic Formules and State Sequencing:
         CODE.LABEL    <= OP[6:0]
         CODE.SEEK     <= OPCODE_JMP | (OPCODE_JZ & (ACC==0)) | (OPCODE_JNZ & !(ACC==0)) | (OPCODE_DJNZ & !(ACC==1))
         CODE.HALT     <= OPCODE_HALT
+
+Part Selection:
+    Here we're selecting different parts for Putaco. Goal is to minimize the amount of different parts,
+    so we're trying to either reuse or rewrite the logic later on.
+
+    Parts:
+        CD74HC221: High-Speed CMOS Logic Dual Monostable Multivibrator with Reset
+            1A#     (* trig on falling *)
+            2A#     (* trig on falling *)
+            1B      (* trig on rising *)
+            2B      (* trig on rising *)
+            1R      (* async reset *)
+            2R      (* async reset *)
+            1Q      (* output *)
+            2Q      (* output *)
+            1Q#     (* output, inverted *)
+            2Q#     (* output, inverted *)
+        CD74HC173: High Speed CMOS Logic Quad D-Type Flip-Flops with 3-State Outputs
+            CP      (* update on rising edge *)
+            MR      (* async reset *)
+            OE#     (* both must be low to enable output *)
+            OE2#    (* both must be low to enable output *)
+            E1#     (* both must be low to enable update *)
+            E2#     (* both must be low to enable update *)
+            D[3:0]  (* input *)
+            Q[3:0]  (* output *)
+        CD74HCT541: 8-ch, 2-V to 6-V buffers with 3-state outputs
+            OE#     (* both must be low to enable *)
+            OE2#    (* both must be low to enable *)
+            A[7:0]  (* input *)
+            Y[7:0]  (* output *)
+        CD74HC238: High Speed CMOS Logic 3-to-8 Line Decoder Demultiplexer, Non-Inverting
+            G0#     (* must be low for Y[A]=H *)
+            G1#     (* must be low for Y[A]=H *)
+            G2      (* must be high for Y[A]=H *)
+            A[2:0]
+            Y[7:0]
+        SN74HC157: Quadruple 2-Line To 1-Line Data Selectors/Multiplexers
+            A#/B    (* A/B selector *)
+            A[3:0]
+            B[3:0]
+            Y[3:0]
+            G#      (* G# high forces Y low *)
+        CD74HC08: 4-ch, 2-input, 2-V to 6-V 5.2 mA drive strength AND gate
+            A[3:0]
+            B[3:0]
+            Y[3:0]
+        CD74HC688: 8-Bit Identity/Magnitude Comparators (P=Q) with Enable
+            E#      (* E# high forces Y is low *)
+            A[7:0]
+            B[7:0]
+            Y       (* Y high when A==B *)
+
+        AS6C4008-55PCN: SRAM - Asynchronous Memory IC 4Mbit Parallel 55 ns 32-PDIP
+            A[18:0]
+            DQ[7:0]
+            CE#
+            WE#
+            OE#
+
+        AS6C1008-55PCN: SRAM - Asynchronous Memory IC 1Mbit Parallel 55 ns 32-PDIP
+            A[16:0]
+            DQ[7:0]
+            CE#, CE2
+            WE#
+            OE#
+
+    Component Mapping:
+        IR          => 2x CD74HC173         (* 6 bit, Instruction Register *)
+        OP          => 2x CD74HC173         (* 8 bit, Opcode Register *)
+        ACC         => 2x CD74HC173         (* 8 bit, Accumulator Register *)
+        STATE_FF    => 1x CD74HC173         (* 4-bit state machine shifter *)
+            0 ~ FI: Fetch Instruction
+            1 ~ FO: Fetch Operand 
+            2 ~ IO: Indirect Operand
+            3 ~ EX: Execute
+
+        ALU         => 1x AS6C4008-55PCN    (* it's a ram, but there's no EEPROM on Digikey available *)
+
+        OP_BUF      => 1x CD74HCT541        (* 3-State-Buffer, Operand *)
+        ACC_BUF     => 1x CD74HCT541        (* 3-State-Buffer, Accumulator *)
+        ALUMUX      => 2x CD74HCT541
+
+        OPCMUX      => 1x CD74HC238         (* opcode demuxer/selector *)
+        OPDMUX      => 2x SN74HC157         (* operand source selector *)
+        AND         => 1x CD74HC08          (* general purpose AND gate *)
+        EQ0         => 1x CD74HC688         (* ACC==0 *)
+        EQ1         => 1x CD74HC688         (* ACC==1 *)
+        
+
+    Updated Interface:
+        - output MEM.ADDR[7:0]
+        - inout  MEM.DATA[7:0]
+        - output MEM.CS#        (* active low *)
+        - output MEM.OE#        (* active low *)
+        - output MEM.WE#        (* active low *)
+    
+    Adapted Logic:
+        ADVANCE_STATE <= (* synthetic advance pulse generated by monoflops *)
+        CLK           <= CODE.STROBE | ADVANCE_STATE
+
+        (* aliases for instructions *)
+        OPCODE_ALU    <= STATE_EX.Q & IR[3]
+
+        (* make OPCMUX.Y[] only 'H' when STATE_EX.Q & !IR[3] *)
+        OPCMUX.G0#     <= 'H'
+        OPCMUX.G1#     <= IR[3]
+        OPCMUX.G2      <= STATE_FF.Q[EX]
+        OPCMUX.A[2:0]  <= IR[2:0]
+
+        OPCODE_HALT     <= OPCMUX.Y[0]
+        OPCODE_SET      <= OPCMUX.Y[1]
+        OPCODE_LD       <= OPCMUX.Y[2]
+        OPCODE_ST       <= OPCMUX.Y[3]
+        OPCODE_JMP      <= OPCMUX.Y[4]
+        OPCODE_JZ       <= OPCMUX.Y[5]
+        OPCODE_JNZ      <= OPCMUX.Y[6]
+        OPCODE_DJNZ     <= OPCMUX.Y[7]
+
+        AND.A[0]        <= IR[4]
+        AND.B[0]        <= STATE_FF.Q[FO]
+
+        STATE_FF.OE#    <= 'L'
+        STATE_FF.CLK    <= CLK
+        STATE_FF.D[FI]  <= STATE_FF.Q[EX]
+        STATE_FF.D[FO]  <= STATE_FF.Q[FI]
+        STATE_FF.D[IO]  <= AND.Y[0]
+        STATE_FF.D[EX]  <= IR[4] ? STATE_FF.Q[IO] : STATE_FF.Q[FO]                (* mux 2:1 *)
+
+        BUS             <= ALU.DATA ~ MEM.DATA ~ OP_BUF.Q ~ ACC_BUF.Q     (* tristate join *)
+
+        IR.D            <= CODE.DATA[5:0]
+        IR.EN           <= STATE_FF.Q[FI]
+        IR.CLK          <= CODE.STROBE
+
+        OPDMUX[*].A#/B  <= STATE_FF.Q[FO]
+        OPDMUX[0].A     <= MEM.DATA[3:0]
+        OPDMUX[1].A     <= MEM.DATA[7:4]
+        OPDMUX[0].B     <= CODE.DATA[3:0]
+        OPDMUX[1].B     <= { IR[5], CODE.DATA[6:4] }
+
+        OP.D            <= { OPDMUX[1].Y[3:0], OPDMUX[0].Y[3:0] }
+        OP.E1#          <= !(STATE_FF.Q[FO] | STATE_FF.Q[IO])
+        OP.E2#          <= 'L'
+        OP.CLK          <= CLK
+
+        OP_BUF.D        <= OP.Q
+        OP_BUF.OE#      <= !OPCODE_SET
+        OP_BUF.OE2#     <= 'L'
+
+        ACC.D           <= BUS
+        ACC.E1#         <= !(OPCODE_ALU | OPCODE_SET | OPCODE_LD | OPCODE_DJNZ)
+        ACC.E2#         <= 'L'
+        ACC.CLK         <= CLK
+
+        ACC_BUF.D       <= ACC.Q
+        ACC_BUF.OE#     <= !OPCODE_ST
+        ACC_BUF.OE2#    <= 'L'
+
+        MEM.CS#         <= !(STATE_FF.Q[IO] | OPCODE_LD | OPCODE_ST)
+        MEM.OE#         <= !(STATE_FF.Q[IO] | OPCODE_LD)
+        MEM.WE#         <= !(OPCODE_ST)
+        MEM.ADDR        <= OP.Q
+
+        ALUMUX[*].OE#   <= !OPCODE_ALU
+        ALUMUX[*].OE2#  <= 'L'
+        ALUMUX[0].A     <= OP.Q
+        ALUMUX[1].A     <= { 'LLLLL', IR[2:0] }
+
+        ALU.A[18:16]    <= ALUMUX[1].Y[2:0] ~ R'LLH'        (* buffer + resistor bias => mux 2:1 *)
+        ALU.A[15: 8]    <= ACC.Q
+        ALU.A[ 7: 0]    <= ALUMUX[0].Y[7:0] ~ R'LLLLLLLH'   (* buffer + resistor bias => mux 2:1 *)
+        ALU.OE#         <= !(OPCODE_ALU | OPCODE_DJNZ)
+
+        EQ0.A           <= ACC.Q
+        EQ0.B           <= 'LLLLLLLL'
+        EQ1.A           <= ACC.Q
+        EQ1.B           <= 'LLLLLLLH'
+
+        AND.A[1]        <= OPCODE_JZ
+        AND.B[1]        <= EQ0.Y
+
+        AND.A[2]        <= OPCODE_JNZ
+        AND.B[2]        <= !EQ0.Y
+
+        AND.A[3]        <= OPCODE_DJNZ
+        AND.B[3]        <= !EQ1.Y
+
+        CODE.LABEL      <= OP[6:0]
+        CODE.SEEK       <= OPCODE_JMP | AND.Y[1] | AND.Y[2] | AND.Y[3]
+        CODE.HALT       <= OPCODE_HALT
