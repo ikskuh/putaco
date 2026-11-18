@@ -138,7 +138,7 @@ Logic Formules and State Sequencing:
         ACC_BUF.D     <= ACC.Q
         ACC_BUF.OE    <= OPCODE_ST
 
-        MEM.CS        <= STATE_IO.Q | (OPCODE_LD | OPCODE_ST)
+        MEM.CS        <= STATE_IO.Q | OPCODE_LD | OPCODE_ST
         MEM.OE        <= STATE_IO.Q | OPCODE_LD
         MEM.WE        <= OPCODE_ST
         MEM.ADDR      <= OP.Q
