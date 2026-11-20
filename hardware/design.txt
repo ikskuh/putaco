@@ -157,7 +157,7 @@ Part Selection:
     so we're trying to either reuse or rewrite the logic later on.
 
     Parts:
-        CD74HC221: High-Speed CMOS Logic Dual Monostable Multivibrator with Reset
+        CD74HC221E: High-Speed CMOS Logic Dual Monostable Multivibrator with Reset
             1A#     (* trig on falling *)
             2A#     (* trig on falling *)
             1B      (* trig on rising *)
@@ -235,22 +235,29 @@ Part Selection:
             CE#, CE2
             WE#
             OE#
+        
+        SST39SF040-70-4C-NHE: NOR-Flash 512K X 8 70ns
+            A[18:0]
+            DQ[7:0]
+            CE#
+            WE#
+            OE#
 
     Component Mapping:
-        IR          => 2x CD74HC173         (* 6 bit, Instruction Register *)
-        OP          => 2x CD74HC173         (* 8 bit, Opcode Register *)
-        ACC         => 2x CD74HC173         (* 8 bit, Accumulator Register *)
-        STATE_FF    => 1x CD74HC173         (* 4-bit state machine shifter *)
+        IR          => 2x CD74HC173E        (* 6 bit, Instruction Register *)
+        OP          => 2x CD74HC173E        (* 8 bit, Opcode Register *)
+        ACC         => 2x CD74HC173E        (* 8 bit, Accumulator Register *)
+        STATE_FF    => 1x CD74HC173E        (* 4-bit state machine shifter *)
             0 ~ FI: Fetch Instruction
             1 ~ FO: Fetch Operand 
             2 ~ IO: Indirect Operand
             3 ~ EX: Execute
 
-        ALU         => 1x AS6C4008-55PCN    (* it's a ram, but there's no EEPROM on Digikey available *)
+        ALU         => 1x SST39SF040-70-4C-NHE
 
-        OP_BUF      => 1x CD74HCT541        (* 3-State-Buffer, Operand *)
-        ACC_BUF     => 1x CD74HCT541        (* 3-State-Buffer, Accumulator *)
-        ALUMUX      => 2x CD74HCT541
+        OP_BUF      => 1x CD74HC541E        (* 3-State-Buffer, Operand *)
+        ACC_BUF     => 1x CD74HC541E        (* 3-State-Buffer, Accumulator *)
+        ALUMUX      => 2x CD74HC541E
 
         OPCMUX      => 1x CD74HC138         (* opcode demuxer/selector *)
         OPDMUX      => 2x SN74HC157         (* operand source selector *)
@@ -371,7 +378,7 @@ Part Selection:
         AND4_1.A[0]     <= OPCODE_ALU#
         AND4_1.B[0]     <= OPCODE_SET#
         AND4_1.C[0]     <= OPCODE_LD#
-        AND4_1.C[0]     <= OPCODE_DJNZ#
+        AND4_1.D[0]     <= OPCODE_DJNZ#
 
         ACC.D           <= BUS
         ACC.E1#         <= AND4_1.Y[0]
@@ -426,9 +433,109 @@ Part Selection:
         AND4_2.A[1]     <= OPCODE_JMP#
         AND4_2.B[1]     <= (OPCODE_JZ# | EQ0.Y#)            (* diode or *)
         AND4_2.C[1]     <= (OPCODE_JNZ# | NOT.Y#[5])        (* diode or *)
-        AND4_2.C[1]     <= (OPCODE_DJNZ# | NOT.Y#[6])       (* diode or *)
+        AND4_2.D[1]     <= (OPCODE_DJNZ# | NOT.Y#[6])       (* diode or *)
 
         CODE.LABEL      <= OP[6:0]
         CODE.SEEK#      <= AND4_2.Y[1]
         CODE.HALT#      <= OPCODE_HALT#
 
+Signal Phasing:
+
+    For correct glitch-free operations, signals have to be activated/deactivated in
+    a certain sequence to ensure correct operation.
+
+    The signals in question are:
+        MEM.ADDR[7:0]
+        MEM.DATA[7:0]
+        MEM.CS
+        MEM.OE
+        MEM.WE
+        ALU.OE#
+        ALUMUX[*].OE#
+        ACC_BUF.OE#
+        OP_BUF.OE#
+        STATE_FF.CLK
+        OP.CLK
+        ACC.CLK
+        IR.CLK
+        OP.CLK
+    
+    For MEM, we assume a single static RAM like the AS6C1008-55PCN for time sequencing.
+
+    Required signal sequencing:
+        ALU Read:
+            \ALU.CS#, >ALU.ADDR
+            \ALU.OE#
+            ALU.DQ=[01]
+            /ALU.OE#, /ALU.CS#
+            ALU.DQ=Z
+
+        MEM Read:
+            \MEM.CS#, >MEM.ADDR
+            \MEM.OE#
+            MEM.DQ=[01]
+            /MEM.OE#, /MEM.CS#
+            MEM.DQ=Z
+
+        MEM.Write:
+            \MEM.CS#, =MEM.ADDR
+            \MEM.WE#, >MEM.DATA
+            <MEM.DQ
+            /MEM.WE#, /MEM.CS#
+            ~MEM.DATA
+
+        ALUMUX[*].OE#, ACC_BUF.OE#, OP_BUF.OE#
+            OP_BUF.OE#
+            <OP_BUF.Y
+
+    Signal Phasing:
+        Each clock is divided into 4 different time points:
+
+        T1: IDLE    | idle phase, all current static control logic is applied.
+        T2: READ    | all active output enables are enabled, all write enables are enabled
+        T3: WRITE   | CLK is latched, all write enables are released
+        T4: ADVANCE | all output enables are released, triggers the next stage transition, so also marks the T1 of the next CPU state
+
+        T1 and T4 are the same point in time, but from a different perspective:
+        A state is starting at T1 and ends in T4.
+
+                T1  T2  T3  T4  
+        SL      ´´´´´´´´´´´´´´´´    (* static logic *)
+        OE#     ´´´´\_______/´´´    (* gate for OE# *)
+        WE#     ´´´´\___/´´´´´´´    (* gate for WE# *)
+        CLK     ________/´´´\___    (* the CLK signal *)
+        ADV     /´´´\_______/´´´    (* the next phase advance trigger *)
+    
+        ADV is the "advance state" signal which triggers the STATE_FF through a positive edge.
+
+        The T states are ordered like this:
+        T1 happens when a new state is entered in STATE_FF.
+        T2 happens when negedge(ADV) (~ 50 us after T4/T1) or posedge(CODE.STROBE) is detected
+        T3 happens ~50 us after T2
+        T4 happens ~100 us after T2, ~50 us after T3
+
+        The OE# signal can be generated by a ~ 100 us monoflop, launched by (negedge(ADV) when (STATE_FF.Q[IO] | STATE_FF.Q[EX])) or posedge(CODE.STROBE)
+        The WE# signal can be generated by a ~ 50 us monoflop, launched by (negedge(ADV) when (STATE_FF.Q[IO] | STATE_FF.Q[EX])) or posedge(CODE.STROBE)
+        The CLK signal can be derived from the WE# signal, as the only required property is the position of the posedge(WE#)
+        The ADV signal can be generated by a ~ 50 us monoflop, launched by posedge(OE#)
+
+    Logic with timing:
+
+        We need to rewire the following signals:
+
+        STATE_FF.CLK    <= ADV                  (* triggers advancement on rising edge *)
+        ACC.CLK         <= WE#                  (* we can use the deactivation event of WE# for also writing the flip-flops *)
+        IR.CLK          <= WE#                  (* CODE.DATA is latched ~ 50 us after CODE.STROBE *)
+        OP.CLK          <= WE#                  (* CODE.DATA is latched ~ 50 us after CODE.STROBE *)
+
+        OP_BUF.OE2#     <= OE#
+        ACC_BUF.OE2#    <= OE#
+        ALUMUX[*].OE2#  <= OE#
+
+        ALU.OE#         <= OE#                  (* rewrite to pure output enable)
+        ALU.CS#         <= AND2.Y[3]            (* statically select the ALU in EX state *)
+
+        MEM.OE#         <= AND2.Y[2]   | OE#    (* diode or for glitchless operation *)
+        MEM.WE#         <= OPCODE_ST#  | WE#    (* diode or for glitchless operation *)
+
+        CODE.SEEK#      <= AND4_2.Y[1] | WE#    (* diode or for glitchless operation *)
