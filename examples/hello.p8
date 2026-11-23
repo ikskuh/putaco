@@ -11,45 +11,45 @@
 ; Allocates a new RAM address, starting at 16
 .alloc ret_addr, 1
 
-    SET  write_e
-    ST   ret_addr
-    SET  'H'
+    SET  A, write_e
+    ST   A, ret_addr
+    SET  A, 'H'
     JMP  write_out
 
 write_e:
-    SET  write_l0
-    ST   ret_addr
-    SET  'e'
+    SET  A, write_l0
+    ST   A, ret_addr
+    SET  A, 'e'
     JMP  write_out
 
 write_l0:
-    SET  write_l1
-    ST   ret_addr
-    SET  'l'
+    SET  A, write_l1
+    ST   A, ret_addr
+    SET  A, 'l'
     JMP  write_out
 
 write_l1:
-    SET  write_o
-    ST   ret_addr
-    SET  'l'
+    SET  A, write_o
+    ST   A, ret_addr
+    SET  A, 'l'
     JMP  write_out
 
 write_o:
-    SET  write_bang
-    ST   ret_addr
-    SET  'o'
+    SET  A, write_bang
+    ST   A, ret_addr
+    SET  A, 'o'
     JMP  write_out
 
 write_bang:
-    SET  write_eol
-    ST   ret_addr
-    SET  '!'
+    SET  A, write_eol
+    ST   A, ret_addr
+    SET  A, '!'
     JMP  write_out
 
 write_eol:
-    SET  stop
-    ST   ret_addr
-    SET  LF
+    SET  A, stop
+    ST   A, ret_addr
+    SET  A, LF
     JMP  write_out
 
 
@@ -59,15 +59,15 @@ stop:
 
 .alloc write_data, 1  ; output byte
 write_out:
-    ST   write_data
+    ST   A, write_data
 .loop:
     ; wait until FIFO is empty (TXE set)
-    LD   IO_STATUS
-    AND  TXE
-    JZ   .loop
+    LD   A, IO_STATUS
+    AND  A, TXE
+    JZ   A, .loop
 
     ; then write the register
-    LD   write_data
-    ST   IO_DATA
+    LD   A, write_data
+    ST   A, IO_DATA
 
     JMP  *ret_addr ; indirect jump to the return address

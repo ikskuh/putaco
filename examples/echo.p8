@@ -7,9 +7,9 @@
 .constant TXE, 2
 
 restart:
-    LD   IO_STATUS
-    AND  3              ; (TXE | RXF)
-    SUB  3           
-    JNZ  restart
-    LD   IO_DATA
-    ST   IO_DATA
+    LD   A, IO_STATUS
+    AND  A, 3              ; (TXE | RXF)
+    SUB  A, 3           
+    JNZ  A, restart
+    LD   A, IO_DATA
+    ST   A, IO_DATA

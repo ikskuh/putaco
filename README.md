@@ -7,6 +7,8 @@
 - no program counter
 - uses a punch tape as program memory
 - 128 branch targets
+- two accumulators
+- 16 instructions
 
 ## Why should we ever use this?
 
@@ -30,7 +32,7 @@ and allows arbitrary label codes interleaved.
 | Bit Range | Name        | Description                                         |
 | --------- | ----------- | --------------------------------------------------- |
 | `[7]`     | `label`     | If set, the byte is a label and not an opcode.      |
-| `[6]`     | *reserved*  | Reserved and must be zero.                          |
+| `[6]`     | `register`  | Selects accumulator A (`0`) or B (`1`)              |
 | `[5]`     | `operand_h` | The 7th bit of the operand.                         |
 | `[4]`     | `indirect`  | If set, the CPU fetches the operand from memory.    |
 | `[3:0]`   | `opcode`    | Defines the operation that is performed by the CPU. |
@@ -80,6 +82,7 @@ while True:
   reg;
   op = wait_next()
   reg;
+  acc = instr[6] ? &acc_a : &acc_b  # "acc" is alias
   if instr[4]:
     op = mem[op]
     reg;

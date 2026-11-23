@@ -1,5 +1,11 @@
 const std = @import("std");
 
+/// The name of the two accumulator registers.
+pub const Register = enum(u1) {
+    a = 0,
+    b = 1,
+};
+
 /// A Putaco operand code.
 /// Defines what an instruction does.
 pub const OpCode = enum(u4) {
@@ -30,6 +36,27 @@ pub const OpCode = enum(u4) {
             else => false,
         };
     }
+
+    pub fn requires_acc(op: OpCode) bool {
+        return switch (op) {
+            .halt => false, // does not consume ACC, only OP
+            .set => true,
+            .ld => true,
+            .st => true,
+            .jmp => false, // does not consume ACC, only OP
+            .jz => true,
+            .jnz => true,
+            .djnz => true,
+            .add => true,
+            .sub => true,
+            .@"and" => true,
+            .xor => true,
+            .shl => true,
+            .shr => true,
+            .asr => true,
+            .neg => true,
+        };
+    }
 };
 
 ///
@@ -57,7 +84,7 @@ pub const InstructionWord = packed struct(u8) {
     indirect: bool,
     /// The high bit of the operand value.
     operand_h: u1,
-    reserved: u1 = 0,
+    register: Register,
     /// Must be set to false to mark the code word as a non-label.
     label: bool = false,
 };
@@ -87,12 +114,13 @@ pub const LabelWord = packed struct(u8) {
 };
 
 /// Encodes an instruction into a pair of two code words.
-pub fn encode_instruction(opcode: OpCode, indirect: bool, operand: u8) [2]CodeWord {
+pub fn encode_instruction(opcode: OpCode, indirect: bool, register: Register, operand: u8) [2]CodeWord {
     return .{
         .{
             .instruction = .{
                 .opcode = opcode,
                 .indirect = indirect,
+                .register = register,
                 .operand_h = @intCast(operand >> 7),
             },
         },
@@ -149,7 +177,8 @@ pub const simulator = struct {
 
         instr: InstructionWord = undefined,
         op: u8 = undefined,
-        acc: u8 = 0,
+        acc_a: u8 = 0,
+        acc_b: u8 = 0,
         seek: LabelWord = .zero,
 
         pub fn step(sim: *Simulator, mem: MemoryInterface, code: CodeWord) Result {
@@ -193,35 +222,39 @@ pub const simulator = struct {
                 },
 
                 .execute => {
+                    const acc = switch (sim.instr.register) {
+                        .a => &sim.acc_a,
+                        .b => &sim.acc_b,
+                    };
                     result = .executing;
                     switch (sim.instr.opcode) {
                         .halt => result = .halt,
                         .set => {
-                            sim.acc = sim.op;
+                            acc.* = sim.op;
                         },
                         .ld => {
-                            sim.acc = mem.read(sim.op);
+                            acc.* = mem.read(sim.op);
                         },
                         .st => {
-                            mem.write(sim.op, sim.acc);
+                            mem.write(sim.op, acc.*);
                         },
 
                         .jmp => {
                             sim.seek = .{ .branch_id = @truncate(sim.op) };
                         },
                         .jz => {
-                            if (sim.acc == 0) {
+                            if (acc.* == 0) {
                                 sim.seek = .{ .branch_id = @truncate(sim.op) };
                             }
                         },
                         .jnz => {
-                            if (sim.acc != 0) {
+                            if (acc.* != 0) {
                                 sim.seek = .{ .branch_id = @truncate(sim.op) };
                             }
                         },
                         .djnz => {
-                            sim.acc -= 1;
-                            if (sim.acc != 0) {
+                            acc.* -= 1;
+                            if (acc.* != 0) {
                                 sim.seek = .{ .branch_id = @truncate(sim.op) };
                             }
                         },
@@ -230,11 +263,11 @@ pub const simulator = struct {
                             std.debug.assert(sim.instr.opcode.is_alu());
                             const index: u19 = @bitCast(AluIndex{
                                 .op = sim.op,
-                                .acc = sim.acc,
+                                .acc = acc.*,
                                 .instr = @truncate(@backingInt(sim.instr.opcode)),
                             });
 
-                            sim.acc = alu[index];
+                            acc.* = alu[index];
                         },
                     }
 

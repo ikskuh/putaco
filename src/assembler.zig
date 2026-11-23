@@ -149,13 +149,28 @@ const Assembler = struct {
                         break opcode;
                 } else @panic("TODO: error handling, unknown opcode");
 
+                const reg: putaco.Register = if (opcode.requires_acc()) blk: {
+                    const name = iter.next() orelse @panic("TODO: error handling, missing reg name");
+
+                    if (!iter.take(",")) {
+                        @panic("TODO: error handling, missing operand");
+                    }
+
+                    break :blk if (eql(name, "a"))
+                        .a
+                    else if (eql(name, "b"))
+                        .b
+                    else
+                        @panic("TODO: Error handling, invalid register name");
+                } else .a;
+
                 const is_indirect = iter.take("*");
 
                 const operand_str = iter.next() orelse @panic("TODO: error handling, missing operand");
 
                 const operand, const required_patch = try as.parse_value_allow_undefined(operand_str);
 
-                const result = putaco.encode_instruction(opcode, is_indirect, operand);
+                const result = putaco.encode_instruction(opcode, is_indirect, reg, operand);
 
                 const offset = as.code.items.len;
 
