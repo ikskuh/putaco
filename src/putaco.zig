@@ -21,9 +21,9 @@ pub const OpCode = enum(u4) {
     sub = 0x9,
     @"and" = 0xA,
     xor = 0xB,
-    shl = 0xC,
-    shr = 0xD,
-    asr = 0xE,
+    shx = 0xC,
+    mul = 0xD,
+    divs = 0xE,
     neg = 0xF,
 
     pub fn is_alu(op: OpCode) bool {
@@ -51,9 +51,9 @@ pub const OpCode = enum(u4) {
             .sub => true,
             .@"and" => true,
             .xor => true,
-            .shl => true,
-            .shr => true,
-            .asr => true,
+            .shx => true,
+            .mul => true,
+            .divs => true,
             .neg => true,
         };
     }
@@ -259,7 +259,7 @@ pub const simulator = struct {
                             }
                         },
 
-                        .@"and", .xor, .add, .sub, .neg, .shr, .shl, .asr => {
+                        .@"and", .xor, .add, .sub, .neg, .shx, .mul, .divs => {
                             std.debug.assert(sim.instr.opcode.is_alu());
                             const index: u19 = @bitCast(AluIndex{
                                 .op = sim.op,

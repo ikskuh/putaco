@@ -14,9 +14,9 @@ pub fn main(init: std.process.Init) !void {
         alu_sub, // 1
         alu_and, // 2
         alu_xor, // 3
-        alu_shl, // 4
-        alu_shr, // 5
-        alu_asr, // 6
+        alu_shx, // 4
+        alu_mul, // 5
+        alu_divs, // 6
         alu_neg, // 7
     };
 
@@ -49,30 +49,33 @@ fn alu_xor(acc: u8, op: u8) u8 {
     return acc ^ op;
 }
 
-fn alu_shl(acc: u8, op: u8) u8 {
-    var out = acc;
-    for (0..op) |_| {
-        out <<= 1;
-    }
-    return out;
+fn alu_shx(acc: u8, op: u8) u8 {
+    const cnt: i8 = @bitCast(op);
+    return switch (cnt) {
+        -7...-1 => return acc >> @intCast(-cnt),
+        0 => return acc,
+        1...7 => return acc << @intCast(cnt),
+        else => 0,
+    };
 }
 
-fn alu_shr(acc: u8, op: u8) u8 {
-    var out = acc;
-    for (0..op) |_| {
-        out >>= 1;
-    }
-    return out;
+fn alu_mul(acc: u8, op: u8) u8 {
+    return acc *% op;
 }
 
-fn alu_asr(acc: u8, op: u8) u8 {
-    const msb = (acc & 0x80);
-    var out = acc;
-    for (0..op) |_| {
-        out >>= 1;
-        out |= msb;
+fn alu_divs(acc: u8, op: u8) u8 {
+    if (op == 0) {
+        // special case: SQRT(op) instead of divide-by-zero
+
+        const in: f32 = @floatFromInt(acc);
+        return @intFromFloat(16 * @sqrt(in));
     }
-    return out;
+
+    const num: i8 = @bitCast(acc);
+
+    const div: i8 = @intCast(@divFloor(@as(i9, num), op));
+
+    return @bitCast(div);
 }
 
 fn alu_neg(acc: u8, op: u8) u8 {

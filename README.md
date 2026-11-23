@@ -55,24 +55,24 @@ and allows arbitrary label codes interleaved.
 
 The CPU implements 16 different operations, 8 of which are arithmetic operations, two memory access and 4 branching.
 
-| Opcode | Name   | Operation              | Description                                                                              |
-| ------ | ------ | ---------------------- | ---------------------------------------------------------------------------------------- |
-| 0      | `halt` |                        | Stops the tape reader.                                                                   |
-| 1      | `set`  | A = op                 | Sets the accumulator to the operand.                                                     |
-| 2      | `ld`   | A = mem[op]            | Loads a byte from memory in the accumulator. Operand is the address.                     |
-| 3      | `st`   | mem[op] = A            | Stores the accumulator to memory. Operand is the address.                                |
-| 4      | `jmp`  | seek(op)               | Branches to the label given in the operand.                                              |
-| 5      | `jz`   | if(!A) seek(op)        | Branches to the label given in the operand when accumulator is zero.                     |
-| 6      | `jnz`  | if(A) seek(op)         | Branches to the label given in the operand when accumulator is non-zero.                 |
-| 7      | `djnz` | A -= 1; if(A) seek(op) | Decrements the accumulator and branches to the given label when accumulator is not zero. |
-| 8      | `add`  | A += op                | Adds the operand to the accumulator.                                                     |
-| 9      | `sub`  | A -= op                | Subtracts the operand to the accumulator.                                                |
-| A      | `and`  | A &= op                | Performs boolean and between accumulator and operand.                                    |
-| B      | `xor`  | A ^= op                | Performs boolean xor between accumulator and operand.                                    |
-| C      | `shl`  | A << op                | Shifts the accumulator left by operand bits Fills in zeroes.                             |
-| D      | `shr`  | A >> op                | Shifts the accumulator right by operand bits. Fills in zeroes.                           |
-| E      | `asr`  | A >>> op               | Shifts the accumulator right by operand bits. Fills in the MSB.                          |
-| F      | `neg`  | A = op - A             | Subtracts the accumulator from the operand.                                              |
+| Opcode | Name   | Operation              | Description                                                                                                |
+| ------ | ------ | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| 0      | `halt` |                        | Stops the tape reader.                                                                                     |
+| 1      | `set`  | A = op                 | Sets the accumulator to the operand.                                                                       |
+| 2      | `ld`   | A = mem[op]            | Loads a byte from memory in the accumulator. Operand is the address.                                       |
+| 3      | `st`   | mem[op] = A            | Stores the accumulator to memory. Operand is the address.                                                  |
+| 4      | `jmp`  | seek(op)               | Branches to the label given in the operand.                                                                |
+| 5      | `jz`   | if(!A) seek(op)        | Branches to the label given in the operand when accumulator is zero.                                       |
+| 6      | `jnz`  | if(A) seek(op)         | Branches to the label given in the operand when accumulator is non-zero.                                   |
+| 7      | `djnz` | A -= 1; if(A) seek(op) | Decrements the accumulator and branches to the given label when accumulator is not zero.                   |
+| 8      | `add`  | A += op                | Adds the operand to the accumulator.                                                                       |
+| 9      | `sub`  | A -= op                | Subtracts the operand to the accumulator.                                                                  |
+| A      | `and`  | A &= op                | Performs boolean and between accumulator and operand.                                                      |
+| B      | `xor`  | A ^= op                | Performs boolean xor between accumulator and operand.                                                      |
+| C      | `shx`  | A << op                | Shifts the accumulator left by signed operand bits Fills in zeroes. Can shift right with negative numbers. |
+| D      | `mul`  | A * op                 | Multiplies `A` and `op` as unsigned integers.                                                              |
+| E      | `divs` | A / op                 | Divides signed `A` by unsigned `op`, returns signed result.                                                |
+| F      | `neg`  | A = op - A             | Subtracts the accumulator from the operand.                                                                |
 
 ## CPU Logic
 
