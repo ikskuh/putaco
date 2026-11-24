@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .width = switch (rref.access) {
                     .full => 1,
                     .index, .broadcast => return error.SyntaxError,
-                    .range => |r| r.high - r.low,
+                    .range => |r| r.width(),
                 },
             };
         } else if (parser.try_take(.kw_const)) {
@@ -180,13 +180,15 @@ const Direction = enum {
 };
 
 const Expression = union(enum) {
-    hardwired: Logic,
-    resistors: Logic,
-    reference: Reference,
+    hardwired: Logic, // 'HL'
+    resistors: Logic, // R'HL'
+    reference: Reference, // FOO, FOO[0], FOO.BAR, FOO[*].BAR[3:0]
 
-    joined: []Expression,
-    diode_or: []Expression,
-    diode_and: []Expression,
+    concat: []Expression, // { … }
+
+    joined: []Expression, // ~
+    diode_or: []Expression, // |
+    diode_and: []Expression, // &
     inverted: *Expression,
 };
 
@@ -215,6 +217,15 @@ const Index = union(enum) {
     named: String,
 };
 
+const BitRange = struct {
+    low: u32,
+    high: u32,
+
+    pub fn width(r: BitRange) u32 {
+        return r.high - r.low + 1;
+    }
+};
+
 const Reference = union(enum) {
     wire: SignalRef,
     instance: struct { InstanceRef, SignalRef },
@@ -234,10 +245,7 @@ const SignalRef = struct {
     access: union(enum) {
         full,
         index: Index,
-        range: struct {
-            low: u32,
-            high: u32,
-        },
+        range: BitRange,
     },
 };
 
@@ -247,10 +255,7 @@ const RangedRef = struct {
         full, // FOO
         index: Index, // FOO[<digits>]
         broadcast, // FOO[*]
-        range: struct { // FOO[<digits>:<digits>]
-            low: u32,
-            high: u32,
-        },
+        range: BitRange, // FOO[<digits>:<digits>]
     },
 
     fn to_instance_ref(rref: RangedRef) !InstanceRef {
@@ -271,7 +276,7 @@ const RangedRef = struct {
                 .full => .full,
                 .broadcast => return error.InvalidRef,
                 .index => |i| .{ .index = i },
-                .range => |r| .{ .range = .{ .low = r.low, .high = r.high } },
+                .range => |r| .{ .range = r },
             },
         };
     }
@@ -379,7 +384,7 @@ const Parser = struct {
             .kind = kind,
             .name = name,
         };
-        defer intf.ports.deinit(gpa);
+        errdefer intf.ports.deinit(gpa);
 
         try parser.take(.@"{");
         while (!parser.try_take(.@"}")) {
@@ -406,7 +411,7 @@ const Parser = struct {
                 .name = rref.name,
                 .width = switch (rref.access) {
                     .full => 1,
-                    .range => |r| r.high - r.low,
+                    .range => |r| r.width(),
                     .index, .broadcast => return error.InvalidNet,
                 },
             };
@@ -418,20 +423,38 @@ const Parser = struct {
     fn parse_expr(parser: *Parser, arena: std.mem.Allocator) error{ OutOfMemory, SyntaxError, Overflow, EndOfFile, InvalidRef, InvalidChar }!*Expression {
         const atom = try parser.parse_atom_expr(arena);
 
-        // const expr = try arena.create(Expression);
-        // errdefer arena.destroy(expr);
+        const sequence: Token.Type = if (parser.try_take(.@"|"))
+            .@"|"
+        else if (parser.try_take(.@"&"))
+            .@"&"
+        else if (parser.try_take(.@"~"))
+            .@"~"
+        else
+            return atom;
 
-        if (parser.try_take(.@"|")) {
-            @panic("not implemented yet");
-        }
-        if (parser.try_take(.@"&")) {
-            @panic("not implemented yet");
-        }
-        if (parser.try_take(.@"~")) {
-            @panic("not implemented yet");
+        var list: std.ArrayList(Expression) = .empty;
+        defer list.deinit(arena);
+
+        try list.append(arena, atom.*);
+
+        while (true) {
+            const next = try parser.parse_atom_expr(arena);
+            try list.append(arena, next.*);
+            if (!parser.try_take(sequence))
+                break;
         }
 
-        return atom;
+        const slice = try list.toOwnedSlice(arena);
+
+        const expr = try arena.create(Expression);
+        errdefer arena.destroy(expr);
+        expr.* = switch (sequence) {
+            .@"&" => .{ .diode_and = slice },
+            .@"|" => .{ .diode_or = slice },
+            .@"~" => .{ .joined = slice },
+            else => unreachable,
+        };
+        return expr;
     }
 
     fn parse_atom_expr(parser: *Parser, arena: std.mem.Allocator) !*Expression {
@@ -440,9 +463,32 @@ const Parser = struct {
             try parser.take(.@")");
             return expr;
         }
+        if (parser.try_take(.@"{")) {
+            var list: std.ArrayList(Expression) = .empty;
+            defer list.deinit(arena);
+
+            while (!parser.try_take(.@"}")) {
+                if (list.items.len > 0)
+                    try parser.take(.@",");
+                const expr = try parser.parse_expr(arena);
+                try list.append(arena, expr.*);
+            }
+
+            const slice = try list.toOwnedSlice(arena);
+
+            const expr = try arena.create(Expression);
+            expr.* = .{ .concat = slice };
+            return expr;
+        }
 
         const expr = try arena.create(Expression);
         errdefer arena.destroy(expr);
+
+        if (parser.try_take(.@"!")) {
+            const child = try parser.parse_atom_expr(arena);
+            expr.* = .{ .inverted = child };
+            return expr;
+        }
 
         if (parser.can_take(.resistor)) {
             const res = try parser.take(.resistor);
@@ -596,7 +642,7 @@ const Tokenizer = struct {
             },
 
             'R', 'r' => {
-                if (tok.pos + 1 < tok.code.len)
+                if (tok.pos + 1 >= tok.code.len)
                     continue :select '_'; // continue with identifier case
                 if (tok.code[tok.pos + 1] != '\'')
                     continue :select '_'; // continue with identifier case
