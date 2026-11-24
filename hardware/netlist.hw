@@ -30,6 +30,11 @@ component: CD74HC221E {
 instance: TIM1 = CD74HC221E
 instance: TIM2 = CD74HC221E
 
+const: FI = 0
+const: FO = 1
+const: IO = 2
+const: EX = 3
+
 wire: RESET
 
 

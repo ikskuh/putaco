@@ -44,6 +44,9 @@ pub fn main(init: std.process.Init) !u8 {
     var wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty;
     defer wires.deinit(gpa);
 
+    var constants: std.AutoArrayHashMapUnmanaged(String, u32) = .empty;
+    defer constants.deinit(gpa);
+
     while (!parser.eof()) {
         std.log.info("top level {?f}", .{parser.peek()});
         if (parser.try_take(.kw_component)) {
@@ -104,6 +107,17 @@ pub fn main(init: std.process.Init) !u8 {
                     .range => |r| r.high - r.low,
                 },
             };
+        } else if (parser.try_take(.kw_const)) {
+            const name = try parser.take(.identifier);
+
+            try parser.take(.@"=");
+
+            const value = try parser.take(.integer);
+            const gop = try constants.getOrPut(gpa, name);
+            if (gop.found_existing) {
+                std.log.err("duplicate constant: {f}", .{name});
+            }
+            gop.value_ptr.* = value;
         } else if (parser.can_take(.identifier)) {
             const ref = try parser.take_ref();
 
@@ -325,10 +339,13 @@ const Parser = struct {
         var low: ?u32 = null;
         var high: ?u32 = null;
         var broadcast = false;
+        var cref: ?String = null;
 
         if (parser.try_take(.@"[")) {
             if (parser.try_take(.@"*")) {
                 broadcast = true;
+            } else if (parser.can_take(.identifier)) {
+                cref = try parser.take(.identifier);
             } else {
                 high = try parser.take(.integer);
 
@@ -344,6 +361,8 @@ const Parser = struct {
             .name = name,
             .access = if (broadcast)
                 .broadcast
+            else if (cref) |ref|
+                .{ .index = .{ .named = ref } }
             else if (low == null and high == null)
                 .full
             else if (low == null and high != null)
@@ -551,6 +570,7 @@ const Tokenizer = struct {
                         inout,
                         instance,
                         wire,
+                        @"const",
                     };
 
                     const kw = std.meta.stringToEnum(Keyword, str) orelse {
@@ -566,6 +586,7 @@ const Tokenizer = struct {
                         .inout => .kw_inout,
                         .instance => .kw_instance,
                         .port => .kw_port,
+                        .@"const" => .kw_const,
                     };
                 }
 
@@ -732,6 +753,7 @@ const Token = union(enum) {
     kw_inout,
     kw_instance,
     kw_wire,
+    kw_const,
 
     pub fn format(t: Token, writer: *std.Io.Writer) !void {
         switch (t) {
@@ -746,6 +768,7 @@ const Token = union(enum) {
             .kw_inout,
             .kw_instance,
             .kw_wire,
+            .kw_const,
             => try writer.print("Token({s}:)", .{@tagName(t)[3..]}),
             else => {
                 try writer.print("Token({t})", .{t});
