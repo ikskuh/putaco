@@ -71,4 +71,17 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(asm_exe);
+
+    //
+    // Build our netlist compiler.
+    //
+    const netlist_exe = b.addExecutable(.{
+        .name = "hwcomp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("utils/hwcomp.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(netlist_exe);
 }
