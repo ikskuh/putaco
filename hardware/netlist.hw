@@ -14,36 +14,180 @@ port: MEM {
     output: WE#
 }
 
+
+(*******************************************
+ * Component Library                       *
+ *******************************************)
+
+(* High Speed CMOS Logic Quad D-Type Flip-Flops with 3-State Outputs *)
+component: CD74HC173E {
+    input:  CP      (* update on rising edge *)
+    input:  MR      (* async reset *)
+    input:  OE#     (* both must be low to enable output *)
+    input:  OE2#    (* both must be low to enable output *)
+    input:  E1#     (* both must be low to enable update *)
+    input:  E2#     (* both must be low to enable update *)
+    input:  D[3:0]  (* input *)
+    output: Q[3:0]  (* output *)
+}
+
+(* 8-ch, 2-V to 6-V buffers with 3-state outputs *)
+component: CD74HC541E {
+    input:  OE#     (* both must be low to enable *)
+    input:  OE2#    (* both must be low to enable *)
+    input:  A[7:0]  (* input *)
+    output: Y[7:0]  (* output *)
+}
+
+(* 4-ch, 2-input, 2-V to 6-V 5.2 mA drive strength AND gate *)
+component: CD74HC08 {
+    input:  A[3:0]
+    input:  B[3:0]
+    output: Y[3:0]
+}
+
+(* High Speed CMOS Logic 3-to-8 Line Decoder Demultiplexer, Inverting *)
+component: CD74HC138 {
+    input:  G0#     (* must be low for Y[A]=L *)
+    input:  G1#     (* must be low for Y[A]=L *)
+    input:  G2      (* must be high for Y[A]=L *)
+    input:  A[2:0]
+    output: Y#[7:0]
+}
+
+(* 2-ch, 4-input, 2-V to 6-V 5.2 mA drive strength AND gate *)
+component: CD74HC21 {
+    input:  A[1:0]
+    input:  B[1:0]
+    input:  C[1:0]
+    input:  D[1:0]
+    output: Y[1:0]
+}
+
+(* High-Speed CMOS Logic Dual Monostable Multivibrator with Reset *)
 component: CD74HC221E {
     input:  1A#     (* trig on falling *)
     input:  2A#     (* trig on falling *)
     input:  1B      (* trig on rising *)
     input:  2B      (* trig on rising *)
-    input:  1R      (* async reset *)
-    input:  2R      (* async reset *)
+    input:  1R#     (* async reset *)
+    input:  2R#     (* async reset *)
     output: 1Q      (* output *)
     output: 2Q      (* output *)
     output: 1Q#     (* output, inverted *)
     output: 2Q#     (* output, inverted *)
 }
 
-instance: TIM1 = CD74HC221E
-instance: TIM2 = CD74HC221E
+(* 8-Bit Identity/Magnitude Comparators (P=Q) with Enable *)
+component: CD74HC688 {
+    input:  E#      (* E# high forces Y=high *)
+    input:  A[7:0]
+    input:  B[7:0]
+    output: Y#      (* Y low when A==B *)
+}
 
-const: FI = 0
-const: FO = 1
-const: IO = 2
-const: EX = 3
+(* Quadruple 2-Line To 1-Line Data Selectors/Multiplexers *)
+component: SN74HC157 {
+    input:  A#/B    (* A/B selector *)
+    input:  A[3:0]
+    input:  B[3:0]
+    output: Y[3:0]
+    input:  G#      (* G# high forces Y low *)
+}
+
+(* 8-ch, 2-V to 6-V inverters with 3-state outputs *)
+component: SN74HC540 {
+    input:  OE1#    (* Y# is Z when OE1# high *)
+    input:  OE2#    (* Y# is Z when OE2# high *)
+    input:  A[7:0]
+    output: Y#[7:0]
+}
+
+(* NOR-Flash 512K X 8 70ns *)
+component: SST39SF040-70-4C-NHE {
+    input:  A[18:0]
+    inout:  DQ[7:0]
+    input:  CE#
+    input:  WE#
+    input:  OE#
+}
+
+(*******************************************
+ * Instances                               *
+ *******************************************)
+
+instance: IR[2]     = CD74HC173E        (* 6 bit, Instruction Register *)
+instance: OP[2]     = CD74HC173E        (* 8 bit, Opcode Register *)
+instance: ACC_A[2]  = CD74HC173E        (* 8 bit, Accumulator A Register *)
+instance: ACC_B[2]  = CD74HC173E        (* 8 bit, Accumulator B Register *)
+instance: STATE_FF  = CD74HC173E        (* 4-bit state machine shifter *)
+    const: FI = 0 (* Fetch Instruction *)
+    const: FO = 1 (* Fetch Operand  *)
+    const: IO = 2 (* Indirect Operand *)
+    const: EX = 3 (* Execute *)
+
+instance: ALU       = SST39SF040-70-4C-NHE
+
+instance: OP_BUF    = CD74HC541E        (* 3-State-Buffer, Operand *)
+instance: ACC_BUF   = CD74HC541E        (* 3-State-Buffer, Accumulator *)
+instance: ALUMUX[2] = CD74HC541E
+
+instance: OPCMUX    = CD74HC138         (* opcode demuxer/selector *)
+instance: OPDMUX[2] = SN74HC157         (* operand source selector *)
+instance: AND2      = CD74HC08          (* general purpose AND gate *)
+instance: AND_MUX   = CD74HC08          (* AND gate used to build a mux *)
+instance: AND4_1    = CD74HC21          (* general purpose AND gate *)
+instance: AND4_2    = CD74HC21          (* general purpose AND gate *)
+instance: NOT       = SN74HC540         (* general purpose NOT gate *)
+instance: EQ0       = CD74HC688         (* ACC == 0 or ACC == 1 *)
+
+instance: TIM1      = CD74HC221E
+instance: TIM2      = CD74HC221E
+
+
+(*******************************************
+ * Interconnect                            *
+ *******************************************)
 
 wire: RESET
+wire: STATE_FI
+wire: STATE_FO
+wire: STATE_IO
+wire: STATE_EX
+wire: STATE_FI#
+wire: STATE_FO#
+wire: STATE_IO#
+wire: STATE_EX#
 
+wire: OPCODE_ALU#
+wire: OPCODE_HALT#
+wire: OPCODE_SET#
+wire: OPCODE_LD#
+wire: OPCODE_ST#
+wire: OPCODE_JMP#
+wire: OPCODE_JZ#
+wire: OPCODE_JNZ#
+wire: OPCODE_DJNZ#
+
+wire: BUS
+
+wire: ACC_BANK_A#
+wire: ACC_BANK_B#
+
+wire: ACC
+
+wire: TRIG_EXEC
+wire: OE#
+wire: WE#
+wire: CLK
+wire: ADV
 
 RESET           <= 'L' (* external signal *)
 
-IR.MR           <= RESET
-OP.MR           <= RESET
-ACC_A.MR        <= RESET
-ACC_B.MR        <= RESET
+IR[*].MR        <= RESET
+OP[*].MR        <= RESET
+ACC_A[*].MR     <= RESET
+ACC_B[*].MR     <= RESET
 STATE_FF.MR     <= RESET
 
 NOT.OE1#        <= 'L'
@@ -60,7 +204,7 @@ AND4_2.D[0]     <= 'H'
 
 STATE_FF.OE#    <= 'L'
 STATE_FF.OE2#   <= 'L'
-STATE_FF.CLK    <= ADV                          (* triggers advancement on rising edge *)
+STATE_FF.CP     <= ADV                          (* triggers advancement on rising edge *)
 STATE_FF.E1#    <= 'L'
 STATE_FF.E2#    <= 'L'
 STATE_FF.D[FI]  <= STATE_EX
@@ -117,12 +261,13 @@ OPCODE_DJNZ#    <= OPCMUX.Y#[7]
 
 BUS             <= ALU.DATA ~ MEM.DATA ~ OP_BUF.Q ~ ACC_BUF.Q ~ R'LLLLLLLL'     (* tristate join *)
 
-IR.D            <= { 'L', CODE.DATA[6:0] }
-IR.E1#          <= STATE_FI#
-IR.E2#          <= 'L'
-IR.CLK          <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
-IR.OE#          <= 'L'
-IR.OE2#         <= 'L'
+IR[0].D         <= CODE.DATA[3:0]
+IR[1].D         <= { 'L', CODE.DATA[6:4] }
+IR[*].E1#       <= STATE_FI#
+IR[*].E2#       <= 'L'
+IR[*].CP        <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+IR[*].OE#       <= 'L'
+IR[*].OE2#      <= 'L'
 
 OPDMUX[*].A#/B  <= STATE_FO#
 OPDMUX[*].G#    <= 'L'
@@ -134,14 +279,15 @@ OPDMUX[1].B     <= MEM.DATA[7:4]
 AND2.A[1]       <= STATE_FO#
 AND2.B[1]       <= STATE_IO#
 
-OP.D            <= { OPDMUX[1].Y[3:0], OPDMUX[0].Y[3:0] }
-OP.E1#          <= AND2.Y[1]
-OP.E2#          <= 'L'
-OP.CLK          <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
-OP.OE#          <= 'L'
-OP.OE2#         <= 'L'
+OP[0].D         <= OPDMUX[0].Y[3:0]
+OP[1].D         <= OPDMUX[1].Y[3:0]
+OP[*].E1#       <= AND2.Y[1]
+OP[*].E2#       <= 'L'
+OP[*].CP        <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+OP[*].OE#       <= 'L'
+OP[*].OE2#      <= 'L'
 
-OP_BUF.D        <= OP.Q
+OP_BUF.A        <= OP.Q
 OP_BUF.OE#      <= OPCODE_SET#
 OP_BUF.OE2#     <= OE#
 
@@ -153,23 +299,25 @@ AND4_1.D[0]     <= OPCODE_DJNZ#
 ACC_BANK_A#     <= IR[6]
 ACC_BANK_B#     <= !IR[6] ~ 'H'             (* mosfet inverter (2N7000) *)
 
-ACC_A.D         <= BUS
-ACC_A.E1#       <= AND4_1.Y[0]
-ACC_A.E2#       <= ACC_BANK_A#
-ACC_A.CLK       <= WE#                          (* we can use the deactivation event of WE# for also writing the flip-flops *)
-ACC_A.OE#       <= ACC_BANK_A#
-ACC_A.OE2#      <= STATE_FI                 (* prevent glitching when fetching new state *)
+ACC_A[0].D      <= BUS[3:0]
+ACC_A[1].D      <= BUS[7:4]
+ACC_A[*].E1#    <= AND4_1.Y[0]
+ACC_A[*].E2#    <= ACC_BANK_A#
+ACC_A[*].CP     <= WE#                          (* we can use the deactivation event of WE# for also writing the flip-flops *)
+ACC_A[*].OE#    <= ACC_BANK_A#
+ACC_A[*].OE2#   <= STATE_FI                 (* prevent glitching when fetching new state *)
 
-ACC_B.D         <= BUS
-ACC_B.E1#       <= AND4_1.Y[0]
-ACC_B.E2#       <= ACC_BANK_B#
-ACC_B.CLK       <= WE#
-ACC_B.OE#       <= ACC_BANK_B#
-ACC_B.OE2#      <= STATE_FI                 (* prevent glitching when fetching new state *)
+ACC_B[0].D      <= BUS[3:0]
+ACC_B[1].D      <= BUS[7:4]
+ACC_B[*].E1#    <= AND4_1.Y[0]
+ACC_B[*].E2#    <= ACC_BANK_B#
+ACC_B[*].CP     <= WE#
+ACC_B[*].OE#    <= ACC_BANK_B#
+ACC_B[*].OE2#   <= STATE_FI                 (* prevent glitching when fetching new state *)
 
 ACC             <= ACC_A ~ ACC_B ~ R'LLLLLLLL'  (* tristate join of both accumulators *)
 
-ACC_BUF.D       <= ACC
+ACC_BUF.A       <= ACC
 ACC_BUF.OE#     <= OPCODE_ST#
 ACC_BUF.OE2#    <= OE#
 

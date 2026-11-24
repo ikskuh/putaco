@@ -44,8 +44,11 @@ pub fn main(init: std.process.Init) !u8 {
     var wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty;
     defer wires.deinit(gpa);
 
-    var constants: std.AutoArrayHashMapUnmanaged(String, u32) = .empty;
+    var constants: ConstMap = .empty;
     defer constants.deinit(gpa);
+
+    var assignments: std.ArrayList(Assignment) = .empty;
+    defer assignments.deinit(gpa);
 
     while (!parser.eof()) {
         std.log.info("top level {?f}", .{parser.peek()});
@@ -55,49 +58,72 @@ pub fn main(init: std.process.Init) !u8 {
             const gop = try interfaces.getOrPut(gpa, intf.name);
             if (gop.found_existing) {
                 std.log.err("duplicate intf: {f}", .{intf.name});
+                return 1;
             }
             gop.value_ptr.* = try arena.create(Interface);
             gop.value_ptr.*.* = intf;
         } else if (parser.try_take(.kw_port)) {
+            // ports directly create instances, not interfaces
             const intf = try parser.take_interface(arena, .port);
 
-            const gop = try interfaces.getOrPut(gpa, intf.name);
+            const gop = try instances.getOrPut(gpa, intf.name);
             if (gop.found_existing) {
-                std.log.err("duplicate intf: {f}", .{intf.name});
+                std.log.err("duplicate port/instance: {f}", .{intf.name});
+                return 1;
             }
-            gop.value_ptr.* = try arena.create(Interface);
-            gop.value_ptr.*.* = intf;
-        } else if (parser.try_take(.kw_instance)) blk: {
+            gop.value_ptr.* = try arena.create(Instance);
+            gop.value_ptr.*.* = .{
+                .interface = try arena.create(Interface),
+                .multiplicity = null, // TODO: Allow port multiplicity?
+            };
+            gop.value_ptr.*.interface.* = intf;
+        } else if (parser.try_take(.kw_instance)) {
             const name = try parser.take(.identifier);
+
+            var multiplicity: ?u32 = null;
+            if (parser.try_take(.@"[")) {
+                multiplicity = try parser.take(.integer);
+                if (multiplicity.? <= 1) {
+                    std.log.err("instance multiplicity must be at least 2!", .{});
+                    return 1;
+                }
+                try parser.take(.@"]");
+            }
+
             try parser.take(.@"=");
             const type_name = try parser.take(.identifier);
 
             if (wires.get(name) != null) {
                 std.log.err("conflict: wire {f} already exists", .{name});
+                return 1;
             }
 
             const intf = interfaces.get(type_name) orelse {
                 std.log.err("unknown interface {f}", .{type_name});
-                break :blk;
+                return 1;
             };
 
             const gop = try instances.getOrPut(gpa, name);
             if (gop.found_existing) {
                 std.log.err("duplicate instance: {f}", .{name});
+                return 1;
             }
             gop.value_ptr.* = try arena.create(Instance);
             gop.value_ptr.*.* = .{
                 .interface = intf,
+                .multiplicity = multiplicity,
             };
         } else if (parser.try_take(.kw_wire)) {
             const rref = try parser.take_rref();
             if (instances.get(rref.name) != null) {
                 std.log.err("conflict: instance {f} already exists", .{rref.name});
+                return 1;
             }
 
             const gop = try wires.getOrPut(gpa, rref.name);
             if (gop.found_existing) {
                 std.log.err("duplicate wire: {f}", .{rref.name});
+                return 1;
             }
             gop.value_ptr.* = .{
                 .name = rref.name,
@@ -116,6 +142,7 @@ pub fn main(init: std.process.Init) !u8 {
             const gop = try constants.getOrPut(gpa, name);
             if (gop.found_existing) {
                 std.log.err("duplicate constant: {f}", .{name});
+                return 1;
             }
             gop.value_ptr.* = value;
         } else if (parser.can_take(.identifier)) {
@@ -125,30 +152,85 @@ pub fn main(init: std.process.Init) !u8 {
 
             const expr = try parser.parse_expr(arena);
 
-            _ = ref;
-            _ = expr;
+            try assignments.append(gpa, .{
+                .target = ref,
+                .source = expr,
+            });
+
+            switch (ref) {
+                .instance => |_iref| {
+                    const iref, const sref = _iref;
+
+                    const inst = instances.get(iref.name) orelse {
+                        std.log.err("undeclared instance {f}", .{iref.name});
+                        return 1;
+                    };
+
+                    switch (iref.access) {
+                        .singleton => if (inst.multiplicity != null) {
+                            std.log.err("{f}: apply broadcast or indexing to multi-instances", .{iref.name});
+                            return 1;
+                        },
+                        .broadcast => if (inst.multiplicity == null) {
+                            std.log.err("{f}: broadcast can only be applied to multi-instances", .{iref.name});
+                            return 1;
+                        },
+                        .indexed => |index| if (inst.multiplicity) |limit| {
+                            const idx = try index.resolve(&constants);
+                            if (idx >= limit) {
+                                std.log.err("{f}: index {} is out of range for {} instances", .{
+                                    iref.name,
+                                    idx,
+                                    limit,
+                                });
+                                return 1;
+                            }
+                        } else {
+                            std.log.err("indexing can only be applied to multi-instances", .{});
+                            return 1;
+                        },
+                    }
+
+                    const port = inst.interface.ports.get(sref.name) orelse {
+                        std.log.err("component {f} (via instance {f}) has no port {f}", .{
+                            iref.name,
+                            inst.interface.name,
+                            sref.name,
+                        });
+                        return 1;
+                    };
+
+                    if (!try sref.is_valid_for_width(&constants, port.width)) {
+                        std.log.err("out of bounds access for port {f}:{f}", .{ iref.name, port.name });
+                        return 1;
+                    }
+                },
+
+                .wire => |wref| {
+                    const wire = wires.get(wref.name) orelse {
+                        std.log.err("undeclared wire {f}", .{wref.name});
+                        return 1;
+                    };
+
+                    if (!try wref.is_valid_for_width(&constants, wire.width)) {
+                        std.log.err("out of bounds access for wire {f}", .{wire.name});
+                        return 1;
+                    }
+                },
+            }
         } else {
             std.log.err("unexpected token {?f}", .{parser.peek()});
             return error.SyntaxError;
         }
     }
 
-    // var tok: Tokenizer = .{
-    //     .code = source,
-    // };
-    // {
-    //     errdefer {
-    //         const line, const col = location_from_pos(source, tok.pos);
-    //         std.debug.print("syntax error in {}:{}\n", .{ line, col });
-    //     }
-
-    //     while (try tok.next()) |token| {
-    //         std.debug.print("{}\n", .{token});
-    //     }
-    // }
-
     return 0;
 }
+
+const Assignment = struct {
+    target: Reference,
+    source: *const Expression,
+};
 
 const Interface = struct {
     pub const Kind = enum { port, component };
@@ -160,6 +242,7 @@ const Interface = struct {
 
 const Instance = struct {
     interface: *Interface,
+    multiplicity: ?u32,
 };
 
 const Port = struct {
@@ -212,9 +295,21 @@ const Logic = struct {
     }
 };
 
+const ConstMap = std.AutoArrayHashMapUnmanaged(String, u32);
+
 const Index = union(enum) {
     numeric: u32,
     named: String,
+
+    fn resolve(idx: Index, consts: *const ConstMap) !u32 {
+        switch (idx) {
+            .numeric => |i| return i,
+            .named => |name| return consts.get(name) orelse {
+                std.log.err("const {f} not found", .{name});
+                return error.ConstNotFound;
+            },
+        }
+    }
 };
 
 const BitRange = struct {
@@ -223,6 +318,10 @@ const BitRange = struct {
 
     pub fn width(r: BitRange) u32 {
         return r.high - r.low + 1;
+    }
+
+    pub fn is_valid_for_width(range: BitRange, w: u32) bool {
+        return range.low < w and range.high < w;
     }
 };
 
@@ -247,6 +346,14 @@ const SignalRef = struct {
         index: Index,
         range: BitRange,
     },
+
+    pub fn is_valid_for_width(ref: SignalRef, consts: *const ConstMap, width: u32) !bool {
+        return switch (ref.access) {
+            .full => true,
+            .index => |i| return (try i.resolve(consts)) < width,
+            .range => |r| return r.is_valid_for_width(width),
+        };
+    }
 };
 
 const RangedRef = struct {
@@ -530,6 +637,11 @@ const Tokenizer = struct {
     fn run(allocator: std.mem.Allocator, code: []const u8, strings: *StringPool) error{ SyntaxError, InvalidNumber, OutOfMemory }!struct { []Token, []usize } {
         var tok: Tokenizer = .{ .code = code, .strings = strings };
 
+        errdefer {
+            const line, const col = location_from_pos(code, tok.pos);
+            std.debug.print("syntax error in {}:{}\n", .{ line, col });
+        }
+
         var cnt: usize = 0;
         while (try tok.next()) |_| cnt += 1;
 
@@ -602,6 +714,7 @@ const Tokenizer = struct {
             's'...'z',
             '#',
             '_',
+            '-',
             '/',
             => {
                 const str = tok.slurp(is_identifier);
@@ -733,7 +846,7 @@ const Tokenizer = struct {
             'a'...'z' => true,
             'A'...'Z' => true,
             '0'...'9' => true,
-            '_', '#', '/' => true,
+            '_', '#', '/', '-' => true,
             else => false,
         };
     }

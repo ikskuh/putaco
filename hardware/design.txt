@@ -179,7 +179,7 @@ Part Selection:
             2Q      (* output *)
             1Q#     (* output, inverted *)
             2Q#     (* output, inverted *)
-        CD74HC173: High Speed CMOS Logic Quad D-Type Flip-Flops with 3-State Outputs
+        CD74HC173E: High Speed CMOS Logic Quad D-Type Flip-Flops with 3-State Outputs
             CP      (* update on rising edge *)
             MR      (* async reset *)
             OE#     (* both must be low to enable output *)
@@ -188,7 +188,7 @@ Part Selection:
             E2#     (* both must be low to enable update *)
             D[3:0]  (* input *)
             Q[3:0]  (* output *)
-        CD74HCT541: 8-ch, 2-V to 6-V buffers with 3-state outputs
+        CD74HC541E: 8-ch, 2-V to 6-V buffers with 3-state outputs
             OE#     (* both must be low to enable *)
             OE2#    (* both must be low to enable *)
             A[7:0]  (* input *)
