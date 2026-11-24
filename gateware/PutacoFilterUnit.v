@@ -14,7 +14,7 @@ module PutacoFilterUnit(
     assign c_halt_n_in = c_halt_n_out;
 
     reg filtering_data = 0;
-    reg [6:0] filter_byte;
+    reg [7:0] filter_byte;
     
     assign c_data_out[6:0] = c_data_in[6:0];
 
@@ -22,11 +22,11 @@ module PutacoFilterUnit(
 
     always @(negedge c_seek_n_out) begin 
         filtering_data <= 1;
-        filter_byte[6:0] <= c_label_out[6:0];
+        filter_byte[6:0] <= { 1'b1, c_label_out[6:0] };
     end
 
     always @(posedge c_strobe_in) begin 
-        if (filtering_data && filter_byte == c_data_in[6:0]) begin 
+        if (filtering_data &&  filter_byte[7:0] == c_data_in[7:0]) begin 
             filtering_data <= 0;
         end
     end

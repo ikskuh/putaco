@@ -44,3 +44,8 @@ test-hello:
     ./zig-out/bin/assembler < examples/hello.p8 > examples/hello.bin
     @echo "----"
     ./zig-out/bin/simulator examples/hello.bin
+
+
+gen-netlist:
+    zig build -freference-trace=16
+    ./zig-out/bin/hwcomp < hardware/netlist.hw

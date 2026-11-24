@@ -1,8 +1,16 @@
 const std = @import("std");
 
+const shared = @import("shared");
+
+const String = shared.String;
+const StringPool = shared.StringPool;
+
 pub fn main(init: std.process.Init) !u8 {
+    const arena = init.arena.allocator();
+    const gpa = init.gpa;
+
     const source: []const u8 = blk: {
-        var writer: std.Io.Writer.Allocating = .init(init.arena.allocator());
+        var writer: std.Io.Writer.Allocating = .init(arena);
 
         var buffer: [4096]u8 = undefined;
         var reader = std.Io.File.stdin().reader(init.io, &buffer);
@@ -12,22 +20,428 @@ pub fn main(init: std.process.Init) !u8 {
         break :blk writer.written();
     };
 
-    var tok: Tokenizer = .{
-        .code = source,
-    };
-    {
-        errdefer {
-            const line, const col = location_from_pos(source, tok.pos);
-            std.debug.print("syntax error in {}:{}\n", .{ line, col });
-        }
+    var strings: StringPool = .init(arena);
+    defer strings.deinit();
 
-        while (try tok.next()) |token| {
-            std.debug.print("{}\n", .{token});
+    const tokens, const token_offsets = try Tokenizer.run(arena, source, &strings);
+
+    var parser: Parser = .{
+        .tokens = tokens,
+        .strings = &strings,
+    };
+
+    errdefer {
+        const line, const col = location_from_pos(source, token_offsets[parser.pos]);
+        std.debug.print("syntax error in {}:{}\n", .{ line, col });
+    }
+
+    var interfaces: std.AutoHashMapUnmanaged(String, *Interface) = .empty;
+    defer interfaces.deinit(gpa);
+
+    var instances: std.AutoArrayHashMapUnmanaged(String, *Instance) = .empty;
+    defer instances.deinit(gpa);
+
+    var wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty;
+    defer wires.deinit(gpa);
+
+    while (!parser.eof()) {
+        std.log.info("top level {?f}", .{parser.peek()});
+        if (parser.try_take(.kw_component)) {
+            const intf = try parser.take_interface(arena, .component);
+
+            const gop = try interfaces.getOrPut(gpa, intf.name);
+            if (gop.found_existing) {
+                std.log.err("duplicate intf: {f}", .{intf.name});
+            }
+            gop.value_ptr.* = try arena.create(Interface);
+            gop.value_ptr.*.* = intf;
+        } else if (parser.try_take(.kw_port)) {
+            const intf = try parser.take_interface(arena, .port);
+
+            const gop = try interfaces.getOrPut(gpa, intf.name);
+            if (gop.found_existing) {
+                std.log.err("duplicate intf: {f}", .{intf.name});
+            }
+            gop.value_ptr.* = try arena.create(Interface);
+            gop.value_ptr.*.* = intf;
+        } else if (parser.try_take(.kw_instance)) blk: {
+            const name = try parser.take(.identifier);
+            try parser.take(.@"=");
+            const type_name = try parser.take(.identifier);
+
+            if (wires.get(name) != null) {
+                std.log.err("conflict: wire {f} already exists", .{name});
+            }
+
+            const intf = interfaces.get(type_name) orelse {
+                std.log.err("unknown interface {f}", .{type_name});
+                break :blk;
+            };
+
+            const gop = try instances.getOrPut(gpa, name);
+            if (gop.found_existing) {
+                std.log.err("duplicate instance: {f}", .{name});
+            }
+            gop.value_ptr.* = try arena.create(Instance);
+            gop.value_ptr.*.* = .{
+                .interface = intf,
+            };
+        } else if (parser.try_take(.kw_wire)) {
+            const rref = try parser.take_rref();
+            if (instances.get(rref.name) != null) {
+                std.log.err("conflict: instance {f} already exists", .{rref.name});
+            }
+
+            const gop = try wires.getOrPut(gpa, rref.name);
+            if (gop.found_existing) {
+                std.log.err("duplicate wire: {f}", .{rref.name});
+            }
+            gop.value_ptr.* = .{
+                .name = rref.name,
+                .width = switch (rref.access) {
+                    .full => 1,
+                    .index, .broadcast => return error.SyntaxError,
+                    .range => |r| r.high - r.low,
+                },
+            };
+        } else if (parser.can_take(.identifier)) {
+            const ref = try parser.take_ref();
+
+            try parser.take(.@"<=");
+
+            const expr = try parser.parse_expr(arena);
+
+            _ = ref;
+            _ = expr;
+        } else {
+            std.log.err("unexpected token {?f}", .{parser.peek()});
+            return error.SyntaxError;
         }
     }
 
+    // var tok: Tokenizer = .{
+    //     .code = source,
+    // };
+    // {
+    //     errdefer {
+    //         const line, const col = location_from_pos(source, tok.pos);
+    //         std.debug.print("syntax error in {}:{}\n", .{ line, col });
+    //     }
+
+    //     while (try tok.next()) |token| {
+    //         std.debug.print("{}\n", .{token});
+    //     }
+    // }
+
     return 0;
 }
+
+const Interface = struct {
+    pub const Kind = enum { port, component };
+
+    name: String,
+    kind: Kind,
+    ports: std.AutoArrayHashMapUnmanaged(String, Port) = .empty,
+};
+
+const Instance = struct {
+    interface: *Interface,
+};
+
+const Port = struct {
+    name: String,
+    width: u32,
+    dir: Direction,
+};
+
+const Wire = struct {
+    name: String,
+    width: u32,
+};
+
+const Direction = enum {
+    in,
+    out,
+    inout,
+};
+
+const Expression = union(enum) {
+    hardwired: Logic,
+    resistors: Logic,
+    reference: Reference,
+
+    joined: []Expression,
+    diode_or: []Expression,
+    diode_and: []Expression,
+    inverted: *Expression,
+};
+
+const Logic = struct {
+    width: u32,
+    bits: std.bit_set.Integer(64),
+
+    pub fn parse(str: []const u8) !Logic {
+        if (str.len > 64)
+            return error.Overflow;
+
+        var logic: Logic = .{
+            .width = @intCast(str.len),
+            .bits = .empty,
+        };
+        for (str, 0..) |c, i| {
+            const level = Tokenizer.logic_to_bit(c) orelse return error.InvalidChar;
+            logic.bits.setValue(i, level != 0);
+        }
+        return logic;
+    }
+};
+
+const Index = union(enum) {
+    numeric: u32,
+    named: String,
+};
+
+const Reference = union(enum) {
+    wire: SignalRef,
+    instance: struct { InstanceRef, SignalRef },
+};
+
+const InstanceRef = struct {
+    name: String,
+    access: union(enum) {
+        singleton,
+        indexed: Index,
+        broadcast,
+    },
+};
+
+const SignalRef = struct {
+    name: String,
+    access: union(enum) {
+        full,
+        index: Index,
+        range: struct {
+            low: u32,
+            high: u32,
+        },
+    },
+};
+
+const RangedRef = struct {
+    name: String,
+    access: union(enum) {
+        full, // FOO
+        index: Index, // FOO[<digits>]
+        broadcast, // FOO[*]
+        range: struct { // FOO[<digits>:<digits>]
+            low: u32,
+            high: u32,
+        },
+    },
+
+    fn to_instance_ref(rref: RangedRef) !InstanceRef {
+        return .{
+            .name = rref.name,
+            .access = switch (rref.access) {
+                .full => .singleton,
+                .broadcast => .broadcast,
+                .index => |i| .{ .indexed = i },
+                .range => return error.InvalidRef,
+            },
+        };
+    }
+    fn to_signal_ref(rref: RangedRef) !SignalRef {
+        return .{
+            .name = rref.name,
+            .access = switch (rref.access) {
+                .full => .full,
+                .broadcast => return error.InvalidRef,
+                .index => |i| .{ .index = i },
+                .range => |r| .{ .range = .{ .low = r.low, .high = r.high } },
+            },
+        };
+    }
+};
+
+const Parser = struct {
+    strings: *StringPool,
+    tokens: []const Token,
+    pos: usize = 0,
+
+    fn eof(parser: *const Parser) bool {
+        return parser.pos >= parser.tokens.len;
+    }
+
+    fn peek(parser: *const Parser) ?Token {
+        if (parser.eof())
+            return null;
+        return parser.tokens[parser.pos];
+    }
+
+    fn can_take(parser: *const Parser, kind: Token.Type) bool {
+        const head = parser.peek() orelse return false;
+        return head == kind;
+    }
+
+    fn try_take(parser: *Parser, kind: Token.Type) bool {
+        const ok = parser.can_take(kind);
+        if (ok) {
+            parser.pos += 1;
+        }
+        return ok;
+    }
+
+    fn take(parser: *Parser, comptime kind: Token.Type) error{ EndOfFile, SyntaxError }!@FieldType(Token, @tagName(kind)) {
+        const head = parser.peek() orelse return error.EndOfFile;
+
+        switch (head) {
+            kind => |body| {
+                parser.pos += 1;
+                return body;
+            },
+            else => return error.SyntaxError,
+        }
+    }
+
+    fn take_ref(parser: *Parser) !Reference {
+        const rref_head = try parser.take_rref();
+
+        if (!parser.try_take(.@".")) {
+            return .{ .wire = try rref_head.to_signal_ref() };
+        }
+
+        const rref_tail = try parser.take_rref();
+
+        return .{
+            .instance = .{
+                try rref_head.to_instance_ref(),
+                try rref_tail.to_signal_ref(),
+            },
+        };
+    }
+
+    fn take_rref(parser: *Parser) !RangedRef {
+        const name = try parser.take(.identifier);
+        var low: ?u32 = null;
+        var high: ?u32 = null;
+        var broadcast = false;
+
+        if (parser.try_take(.@"[")) {
+            if (parser.try_take(.@"*")) {
+                broadcast = true;
+            } else {
+                high = try parser.take(.integer);
+
+                if (parser.try_take(.@":")) {
+                    low = try parser.take(.integer);
+                }
+            }
+
+            try parser.take(.@"]");
+        }
+
+        return .{
+            .name = name,
+            .access = if (broadcast)
+                .broadcast
+            else if (low == null and high == null)
+                .full
+            else if (low == null and high != null)
+                .{ .index = .{ .numeric = high.? } }
+            else
+                .{ .range = .{ .low = low.?, .high = high.? } },
+        };
+    }
+
+    fn take_interface(parser: *Parser, gpa: std.mem.Allocator, kind: Interface.Kind) !Interface {
+        const name = try parser.take(.identifier);
+
+        var intf: Interface = .{
+            .kind = kind,
+            .name = name,
+        };
+        defer intf.ports.deinit(gpa);
+
+        try parser.take(.@"{");
+        while (!parser.try_take(.@"}")) {
+            const dir: Direction = if (parser.try_take(.kw_input))
+                .in
+            else if (parser.try_take(.kw_output))
+                .out
+            else if (parser.try_take(.kw_inout))
+                .inout
+            else
+                return error.SyntaxError;
+
+            const rref = try parser.take_rref();
+
+            const gop = try intf.ports.getOrPut(gpa, rref.name);
+            if (gop.found_existing) {
+                return error.DuplicateNet;
+            }
+            if (rref.access == .range and rref.access.range.low != 0) {
+                return error.InvalidNet;
+            }
+            gop.value_ptr.* = .{
+                .dir = dir,
+                .name = rref.name,
+                .width = switch (rref.access) {
+                    .full => 1,
+                    .range => |r| r.high - r.low,
+                    .index, .broadcast => return error.InvalidNet,
+                },
+            };
+        }
+
+        return intf;
+    }
+
+    fn parse_expr(parser: *Parser, arena: std.mem.Allocator) error{ OutOfMemory, SyntaxError, Overflow, EndOfFile, InvalidRef, InvalidChar }!*Expression {
+        const atom = try parser.parse_atom_expr(arena);
+
+        // const expr = try arena.create(Expression);
+        // errdefer arena.destroy(expr);
+
+        if (parser.try_take(.@"|")) {
+            @panic("not implemented yet");
+        }
+        if (parser.try_take(.@"&")) {
+            @panic("not implemented yet");
+        }
+        if (parser.try_take(.@"~")) {
+            @panic("not implemented yet");
+        }
+
+        return atom;
+    }
+
+    fn parse_atom_expr(parser: *Parser, arena: std.mem.Allocator) !*Expression {
+        if (parser.try_take(.@"(")) {
+            const expr = parser.parse_expr(arena);
+            try parser.take(.@")");
+            return expr;
+        }
+
+        const expr = try arena.create(Expression);
+        errdefer arena.destroy(expr);
+
+        if (parser.can_take(.resistor)) {
+            const res = try parser.take(.resistor);
+            expr.* = .{ .resistors = try .parse(res) };
+            return expr;
+        }
+
+        if (parser.can_take(.logic)) {
+            const res = try parser.take(.logic);
+            expr.* = .{ .hardwired = try .parse(res) };
+            return expr;
+        }
+
+        const ref = try parser.take_ref();
+        expr.* = .{ .reference = ref };
+        return expr;
+    }
+};
 
 fn location_from_pos(str: []const u8, pos: usize) struct { u32, u32 } {
     var line: u32 = 1;
@@ -44,10 +458,28 @@ fn location_from_pos(str: []const u8, pos: usize) struct { u32, u32 } {
 }
 
 const Tokenizer = struct {
+    strings: *StringPool,
     code: []const u8,
     pos: usize = 0,
 
-    pub fn next(tok: *Tokenizer) error{ SyntaxError, InvalidNumber }!?Token {
+    fn run(allocator: std.mem.Allocator, code: []const u8, strings: *StringPool) error{ SyntaxError, InvalidNumber, OutOfMemory }!struct { []Token, []usize } {
+        var tok: Tokenizer = .{ .code = code, .strings = strings };
+
+        var cnt: usize = 0;
+        while (try tok.next()) |_| cnt += 1;
+
+        tok.pos = 0;
+
+        const stream = try allocator.alloc(Token, cnt);
+        const offsets = try allocator.alloc(usize, cnt);
+        for (offsets, stream) |*o, *t| {
+            o.* = tok.pos;
+            t.* = (tok.next() catch unreachable) orelse unreachable;
+        }
+        return .{ stream, offsets };
+    }
+
+    pub fn next(tok: *Tokenizer) error{ SyntaxError, InvalidNumber, OutOfMemory }!?Token {
         try tok.skip_whitespace();
         if (tok.pos >= tok.code.len)
             return null;
@@ -55,6 +487,7 @@ const Tokenizer = struct {
         select: switch (tok.code[tok.pos]) {
             '.' => return tok.make_simple(.@"."),
             ',' => return tok.make_simple(.@","),
+            '=' => return tok.make_simple(.@"="),
             ':' => return tok.make_simple(.@":"),
             '<' => return tok.make_simple(.@"<="),
             '[' => return tok.make_simple(.@"["),
@@ -81,8 +514,17 @@ const Tokenizer = struct {
             },
 
             '0'...'9' => {
-                const str = tok.slurp(is_digit);
+                var str = tok.slurp(is_digit);
                 std.debug.assert(str.len >= 1);
+
+                const suffix = tok.slurp(is_identifier);
+                if (suffix.len > 0) {
+                    // this isn't a number, but an identifier like "1A#", thanks 74xx
+                    str.len += suffix.len;
+                    std.debug.assert(str.ptr + str.len == suffix.ptr + suffix.len);
+                    return .{ .identifier = try tok.strings.get_or_put(str) };
+                }
+
                 const num = std.fmt.parseInt(u32, str, 10) catch return error.InvalidNumber;
                 return .{
                     .integer = num,
@@ -98,8 +540,37 @@ const Tokenizer = struct {
             '/',
             => {
                 const str = tok.slurp(is_identifier);
+                if (tok.peek() == ':') {
+                    tok.pos += 1;
+
+                    const Keyword = enum {
+                        component,
+                        port,
+                        input,
+                        output,
+                        inout,
+                        instance,
+                        wire,
+                    };
+
+                    const kw = std.meta.stringToEnum(Keyword, str) orelse {
+                        std.log.err("invalid keyword: {s}", .{str});
+                        return error.SyntaxError;
+                    };
+
+                    return switch (kw) {
+                        .wire => .kw_wire,
+                        .component => .kw_component,
+                        .input => .kw_input,
+                        .output => .kw_output,
+                        .inout => .kw_inout,
+                        .instance => .kw_instance,
+                        .port => .kw_port,
+                    };
+                }
+
                 return .{
-                    .identifier = str,
+                    .identifier = try tok.strings.get_or_put(str),
                 };
             },
 
@@ -119,8 +590,17 @@ const Tokenizer = struct {
                 };
             },
 
-            else => return error.SyntaxError,
+            else => {
+                std.log.err("unexpected char '{c}'", .{tok.code[tok.pos]});
+                return error.SyntaxError;
+            },
         }
+    }
+
+    fn peek(tok: *const Tokenizer) ?u8 {
+        if (tok.pos >= tok.code.len)
+            return null;
+        return tok.code[tok.pos];
     }
 
     fn slurp(tok: *Tokenizer, comptime accepted: fn (u8) bool) []const u8 {
@@ -204,6 +684,7 @@ const Token = union(enum) {
     const Type = std.meta.Tag(Token);
 
     @".",
+    @"=",
     @",",
     @":",
     @"<=",
@@ -239,8 +720,36 @@ const Token = union(enum) {
     logic: []const u8,
 
     /// Identifier, e.g. `WE#` or `OPMUX_1`.
-    identifier: []const u8,
+    identifier: String,
 
     /// An integer value
     integer: u32,
+
+    kw_component,
+    kw_port,
+    kw_input,
+    kw_output,
+    kw_inout,
+    kw_instance,
+    kw_wire,
+
+    pub fn format(t: Token, writer: *std.Io.Writer) !void {
+        switch (t) {
+            .resistor => |data| try writer.print("Token(resistor=R'{s}')", .{data}),
+            .logic => |data| try writer.print("Token(logic='{s}')", .{data}),
+            .identifier => |data| try writer.print("Token(identifier={f})", .{data}),
+            .integer => |data| try writer.print("Token(integer={d})", .{data}),
+            .kw_component,
+            .kw_port,
+            .kw_input,
+            .kw_output,
+            .kw_inout,
+            .kw_instance,
+            .kw_wire,
+            => try writer.print("Token({s}:)", .{@tagName(t)[3..]}),
+            else => {
+                try writer.print("Token({t})", .{t});
+            },
+        }
+    }
 };

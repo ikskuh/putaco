@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const putaco = @import("putaco");
+const shared = @import("shared");
 
 pub fn main(init: std.process.Init) !u8 {
     const source: []const u8 = blk: {
@@ -39,12 +40,10 @@ pub fn main(init: std.process.Init) !u8 {
 
 const Assembler = struct {
     gpa: std.mem.Allocator,
-
-    arena: std.heap.ArenaAllocator,
+    strings: shared.StringPool,
 
     labels: std.AutoArrayHashMapUnmanaged(String, u7) = .empty,
     symbols: std.AutoArrayHashMapUnmanaged(String, u8) = .empty,
-    intern_map: std.StringArrayHashMapUnmanaged(String) = .empty,
 
     next_label: u7 = 0,
     next_ram_addr: u8 = 16,
@@ -55,17 +54,16 @@ const Assembler = struct {
     pub fn init(gpa: std.mem.Allocator) Assembler {
         return Assembler{
             .gpa = gpa,
-            .arena = .init(gpa),
+            .strings = .init(gpa),
         };
     }
 
     pub fn deinit(as: *Assembler) void {
         as.labels.deinit(as.gpa);
-        as.intern_map.deinit(as.gpa);
+        as.strings.deinit();
         as.symbols.deinit(as.gpa);
         as.patches.deinit(as.gpa);
         as.code.deinit(as.gpa);
-        as.arena.deinit();
         as.* = undefined;
     }
 
@@ -200,7 +198,7 @@ const Assembler = struct {
                 // Return placeholder value for later,
                 // we know that `text` is a valid symbol name, as otherwise we
                 // would have received InvalidCharacter:
-                return .{ 0xAA, try as.intern_string(text) };
+                return .{ 0xAA, try as.strings.get_or_put(text) };
             },
 
             error.InvalidCharacter, error.Overflow, error.OutOfMemory => |e| return e,
@@ -225,7 +223,7 @@ const Assembler = struct {
         }
 
         if (is_symbol_name(text)) {
-            const str = try as.intern_string(text);
+            const str = try as.strings.get_or_put(text);
 
             if (as.symbols.get(str)) |sym| {
                 return sym;
@@ -238,7 +236,7 @@ const Assembler = struct {
     }
 
     fn define_symbol(as: *Assembler, name: []const u8, value: u8) !void {
-        const name_id = try as.intern_string(name);
+        const name_id = try as.strings.get_or_put(name);
 
         const gop = try as.symbols.getOrPut(as.gpa, name_id);
         if (gop.found_existing)
@@ -260,33 +258,7 @@ const Assembler = struct {
         return true;
     }
 
-    const String = *const opaque {
-        fn to_slice(s: String) []const u8 {
-            const head: [*]const u8 = @ptrCast(s);
-
-            const len = std.mem.readInt(u32, head[0..4], .native);
-            return head[4..][0..len];
-        }
-
-        pub fn format(s: String, writer: *std.Io.Writer) !void {
-            try writer.print("\"{s}\"", .{std.zig.fmtString(s.to_slice())});
-        }
-    };
-
-    fn intern_string(as: *Assembler, s: []const u8) !String {
-        const len = std.math.cast(u32, s.len) orelse return error.OutOfMemory;
-        const gop = try as.intern_map.getOrPut(as.gpa, s);
-        if (!gop.found_existing) {
-            errdefer _ = as.intern_map.swapRemove(s);
-
-            const bytes = try as.arena.allocator().allocBytesAligned(.@"4", 4 + s.len, @returnAddress());
-            std.mem.writeInt(u32, bytes[0..4], len, .native);
-            @memcpy(bytes[4..][0..s.len], s);
-
-            gop.value_ptr.* = @ptrCast(bytes);
-        }
-        return gop.value_ptr.*;
-    }
+    const String = shared.String;
 
     const LineIter = struct {
         line: []const u8,

@@ -6,6 +6,10 @@ pub fn build(b: *std.Build) void {
 
     const aux_dir: std.Build.InstallDir = .{ .custom = "aux" };
 
+    const shared_mod = b.createModule(.{
+        .root_source_file = b.path("src/shared.zig"),
+    });
+
     //
     // Generate the ALU look-up table and install it to aux.
     //
@@ -66,6 +70,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "putaco", .module = putaco_mod },
+                .{ .name = "shared", .module = shared_mod },
             },
         }),
     });
@@ -81,6 +86,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("utils/hwcomp.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "shared", .module = shared_mod },
+            },
         }),
     });
     b.installArtifact(netlist_exe);
