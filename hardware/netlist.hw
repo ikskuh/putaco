@@ -116,8 +116,8 @@ component: SST39SF040-70-4C-NHE {
  * Instances                               *
  *******************************************)
 
-instance: IR[2]     = CD74HC173E        (* 6 bit, Instruction Register *)
-instance: OP[2]     = CD74HC173E        (* 8 bit, Opcode Register *)
+instance: IR_FF[2]  = CD74HC173E        (* 6 bit, Instruction Register *)
+instance: OP_FF[2]  = CD74HC173E        (* 8 bit, Opcode Register *)
 instance: ACC_A[2]  = CD74HC173E        (* 8 bit, Accumulator A Register *)
 instance: ACC_B[2]  = CD74HC173E        (* 8 bit, Accumulator B Register *)
 instance: STATE_FF  = CD74HC173E        (* 4-bit state machine shifter *)
@@ -175,6 +175,8 @@ wire: ACC_BANK_A#
 wire: ACC_BANK_B#
 
 wire: ACC
+wire: IR
+wire: OP
 
 wire: TRIG_EXEC
 wire: OE#
@@ -184,8 +186,8 @@ wire: ADV
 
 RESET           <= 'L' (* external signal *)
 
-IR[*].MR        <= RESET
-OP[*].MR        <= RESET
+IR_FF[*].MR     <= RESET
+OP_FF[*].MR     <= RESET
 ACC_A[*].MR     <= RESET
 ACC_B[*].MR     <= RESET
 STATE_FF.MR     <= RESET
@@ -261,13 +263,14 @@ OPCODE_DJNZ#    <= OPCMUX.Y#[7]
 
 BUS             <= ALU.DATA ~ MEM.DATA ~ OP_BUF.Q ~ ACC_BUF.Q ~ R'LLLLLLLL'     (* tristate join *)
 
-IR[0].D         <= CODE.DATA[3:0]
-IR[1].D         <= { 'L', CODE.DATA[6:4] }
-IR[*].E1#       <= STATE_FI#
-IR[*].E2#       <= 'L'
-IR[*].CP        <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
-IR[*].OE#       <= 'L'
-IR[*].OE2#      <= 'L'
+IR_FF[0].D      <= CODE.DATA[3:0]
+IR_FF[1].D      <= { 'L', CODE.DATA[6:4] }
+IR_FF[*].E1#    <= STATE_FI#
+IR_FF[*].E2#    <= 'L'
+IR_FF[*].CP     <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+IR_FF[*].OE#    <= 'L'
+IR_FF[*].OE2#   <= 'L'
+IR              <= { IR_FF[1].Q, IR_FF[0].Q }
 
 OPDMUX[*].A#/B  <= STATE_FO#
 OPDMUX[*].G#    <= 'L'
@@ -279,13 +282,15 @@ OPDMUX[1].B     <= MEM.DATA[7:4]
 AND2.A[1]       <= STATE_FO#
 AND2.B[1]       <= STATE_IO#
 
-OP[0].D         <= OPDMUX[0].Y[3:0]
-OP[1].D         <= OPDMUX[1].Y[3:0]
-OP[*].E1#       <= AND2.Y[1]
-OP[*].E2#       <= 'L'
-OP[*].CP        <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
-OP[*].OE#       <= 'L'
-OP[*].OE2#      <= 'L'
+OP_FF[0].D      <= OPDMUX[0].Y[3:0]
+OP_FF[1].D      <= OPDMUX[1].Y[3:0]
+OP_FF[*].E1#    <= AND2.Y[1]
+OP_FF[*].E2#    <= 'L'
+OP_FF[*].CP     <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+OP_FF[*].OE#    <= 'L'
+OP_FF[*].OE2#   <= 'L'
+
+OP              <= { OP_FF[1].Q, OP_FF[0].Q }
 
 OP_BUF.A        <= OP.Q
 OP_BUF.OE#      <= OPCODE_SET#

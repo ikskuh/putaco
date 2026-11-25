@@ -47,5 +47,5 @@ test-hello:
 
 
 gen-netlist:
-    zig build -freference-trace=16
+    zig build -freference-trace=8 --error-style minimal --summary none
     ./zig-out/bin/hwcomp < hardware/netlist.hw

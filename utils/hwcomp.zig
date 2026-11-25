@@ -9,7 +9,10 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
 
-    const source: []const u8 = blk: {
+    var strings: StringPool = .init(arena);
+    defer strings.deinit();
+
+    const source: SourceFile = blk: {
         var writer: std.Io.Writer.Allocating = .init(arena);
 
         var buffer: [4096]u8 = undefined;
@@ -17,22 +20,17 @@ pub fn main(init: std.process.Init) !u8 {
 
         _ = try reader.interface.streamRemaining(&writer.writer);
 
-        break :blk writer.written();
+        break :blk try Tokenizer.run(arena, writer.written(), &strings);
     };
 
-    var strings: StringPool = .init(arena);
-    defer strings.deinit();
-
-    const tokens, const token_offsets = try Tokenizer.run(arena, source, &strings);
-
     var parser: Parser = .{
-        .tokens = tokens,
+        .source = &source,
         .strings = &strings,
     };
 
     errdefer {
-        const line, const col = location_from_pos(source, token_offsets[parser.pos]);
-        std.debug.print("syntax error in {}:{}\n", .{ line, col });
+        const info = source.get_token_line_info(parser.pos);
+        std.debug.print("syntax error in {}:{}\n", .{ info.line, info.column });
     }
 
     var compiler: Compiler = .{ .arena = arena };
@@ -42,6 +40,39 @@ pub fn main(init: std.process.Init) !u8 {
 
     return 0;
 }
+
+const SourceFile = struct {
+    code: []const u8,
+    tokens: []const Token,
+    offsets: []const usize,
+
+    fn get_token_line_info(source: SourceFile, index: usize) LineInfo {
+        return location_from_pos(source.code, source.offsets[index]);
+    }
+
+    fn get_char_line_info(source: SourceFile, pos: usize) LineInfo {
+        return location_from_pos(source.code, pos);
+    }
+
+    fn location_from_pos(str: []const u8, pos: usize) LineInfo {
+        var line: u32 = 1;
+        var col: u32 = 1;
+        for (str[0..pos]) |c| {
+            if (c == '\n') {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        return .{ .line = line, .column = col };
+    }
+};
+
+const LineInfo = struct {
+    line: u32,
+    column: u32,
+};
 
 const Compiler = struct {
     arena: std.mem.Allocator,
@@ -62,8 +93,15 @@ const Compiler = struct {
 
     pub fn throw_error(cc: *Compiler, parser: *Parser, comptime fmt: []const u8, args: anytype) error{SemanticError} {
         _ = cc;
-        _ = parser;
-        std.log.err(fmt, args);
+
+        const pos = parser.pos;
+        if (pos < parser.source.offsets.len) {
+            const line = parser.source.get_token_line_info(pos);
+
+            std.log.err("{}:{}: " ++ fmt, .{ line.line, line.column } ++ args);
+        } else {
+            std.log.err(fmt, args);
+        }
         return error.SemanticError;
     }
 
@@ -161,67 +199,100 @@ const Compiler = struct {
 
                 const expr = try parser.parse_expr(cc.arena);
 
-                try cc.assignments.append(gpa, .{
+                const assignment: Assignment = .{
                     .target = ref,
                     .source = expr,
-                });
+                };
 
-                switch (ref) {
-                    .instance => |_iref| {
-                        const iref, const sref = _iref;
+                try cc.validate_assignment(parser, assignment);
 
-                        const inst = cc.instances.get(iref.name) orelse {
-                            return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
-                        };
-
-                        switch (iref.access) {
-                            .singleton => if (inst.multiplicity != null) {
-                                return cc.throw_error(parser, "{f}: apply broadcast or indexing to multi-instances", .{iref.name});
-                            },
-                            .broadcast => if (inst.multiplicity == null) {
-                                return cc.throw_error(parser, "{f}: broadcast can only be applied to multi-instances", .{iref.name});
-                            },
-                            .indexed => |index| if (inst.multiplicity) |limit| {
-                                const idx = try index.resolve(&cc.constants);
-                                if (idx >= limit) {
-                                    return cc.throw_error(parser, "{f}: index {} is out of range for {} instances", .{
-                                        iref.name,
-                                        idx,
-                                        limit,
-                                    });
-                                }
-                            } else {
-                                return cc.throw_error(parser, "indexing can only be applied to multi-instances", .{});
-                            },
-                        }
-
-                        const port = inst.interface.ports.get(sref.name) orelse {
-                            return cc.throw_error(parser, "component {f} (via instance {f}) has no port {f}", .{
-                                iref.name,
-                                inst.interface.name,
-                                sref.name,
-                            });
-                        };
-
-                        if (!try sref.is_valid_for_width(&cc.constants, port.width)) {
-                            return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
-                        }
-                    },
-
-                    .wire => |wref| {
-                        const wire = cc.wires.get(wref.name) orelse {
-                            return cc.throw_error(parser, "undeclared wire {f}", .{wref.name});
-                        };
-
-                        if (!try wref.is_valid_for_width(&cc.constants, wire.width)) {
-                            return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
-                        }
-                    },
-                }
+                try cc.assignments.append(gpa, assignment);
             } else {
                 std.log.err("unexpected token {?f}", .{parser.peek()});
                 return error.SyntaxError;
             }
+        }
+    }
+
+    fn validate_assignment(cc: *Compiler, parser: *Parser, assignment: Assignment) !void {
+        try cc.validate_ref(parser, assignment.target, .assignment);
+
+        try cc.validate_expr(parser, assignment.source);
+    }
+
+    fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression) !void {
+        switch (expr.*) {
+            .hardwired => {}, // always ok
+            .resistors => {}, // always ok
+            .reference => |ref| try cc.validate_ref(parser, ref, .expression),
+
+            .concat => |sequence| for (sequence) |*child| {
+                try cc.validate_expr(parser, child);
+            },
+
+            .joined, .diode_or, .diode_and => |siblings| for (siblings) |*sibling| {
+                try cc.validate_expr(parser, sibling);
+            },
+
+            .inverted => |child| try cc.validate_expr(parser, child),
+        }
+    }
+
+    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: enum { assignment, expression }) !void {
+        switch (ref) {
+            .instance => |_iref| {
+                const iref, const sref = _iref;
+
+                const inst = cc.instances.get(iref.name) orelse {
+                    return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
+                };
+
+                switch (iref.access) {
+                    .singleton => if (inst.multiplicity != null) {
+                        return cc.throw_error(parser, "{f}: apply broadcast or indexing to multi-instances", .{iref.name});
+                    },
+                    .broadcast => switch (context) {
+                        .assignment => if (inst.multiplicity == null) {
+                            return cc.throw_error(parser, "{f}: broadcast can only be applied to multi-instances", .{iref.name});
+                        },
+                        .expression => return cc.throw_error(parser, "{f}: broadcast can only be used left of '<='", .{iref.name}),
+                    },
+                    .indexed => |index| if (inst.multiplicity) |limit| {
+                        const idx = try index.resolve(&cc.constants);
+                        if (idx >= limit) {
+                            return cc.throw_error(parser, "{f}: index {} is out of range for {} instances", .{
+                                iref.name,
+                                idx,
+                                limit,
+                            });
+                        }
+                    } else {
+                        return cc.throw_error(parser, "indexing can only be applied to multi-instances", .{});
+                    },
+                }
+
+                const port = inst.interface.ports.get(sref.name) orelse {
+                    return cc.throw_error(parser, "component {f} (via instance {f}) has no port {f}", .{
+                        iref.name,
+                        inst.interface.name,
+                        sref.name,
+                    });
+                };
+
+                if (!try sref.is_valid_for_width(&cc.constants, port.width)) {
+                    return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
+                }
+            },
+
+            .wire => |wref| {
+                const wire = cc.wires.get(wref.name) orelse {
+                    return cc.throw_error(parser, "undeclared wire {f}", .{wref.name});
+                };
+
+                if (!try wref.is_valid_for_width(&cc.constants, wire.width)) {
+                    return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
+                }
+            },
         }
     }
 };
@@ -390,17 +461,17 @@ const RangedRef = struct {
 
 const Parser = struct {
     strings: *StringPool,
-    tokens: []const Token,
+    source: *const SourceFile,
     pos: usize = 0,
 
     fn eof(parser: *const Parser) bool {
-        return parser.pos >= parser.tokens.len;
+        return parser.pos >= parser.source.tokens.len;
     }
 
     fn peek(parser: *const Parser) ?Token {
         if (parser.eof())
             return null;
-        return parser.tokens[parser.pos];
+        return parser.source.tokens[parser.pos];
     }
 
     fn can_take(parser: *const Parser, kind: Token.Type) bool {
@@ -614,31 +685,17 @@ const Parser = struct {
     }
 };
 
-fn location_from_pos(str: []const u8, pos: usize) struct { u32, u32 } {
-    var line: u32 = 1;
-    var col: u32 = 1;
-    for (str[0..pos]) |c| {
-        if (c == '\n') {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    return .{ line, col };
-}
-
 const Tokenizer = struct {
     strings: *StringPool,
     code: []const u8,
     pos: usize = 0,
 
-    fn run(allocator: std.mem.Allocator, code: []const u8, strings: *StringPool) error{ SyntaxError, InvalidNumber, OutOfMemory }!struct { []Token, []usize } {
+    fn run(allocator: std.mem.Allocator, code: []const u8, strings: *StringPool) error{ SyntaxError, InvalidNumber, OutOfMemory }!SourceFile {
         var tok: Tokenizer = .{ .code = code, .strings = strings };
 
         errdefer {
-            const line, const col = location_from_pos(code, tok.pos);
-            std.debug.print("syntax error in {}:{}\n", .{ line, col });
+            const info = SourceFile.location_from_pos(code, tok.pos);
+            std.debug.print("syntax error in {}:{}\n", .{ info.line, info.column });
         }
 
         var cnt: usize = 0;
@@ -652,7 +709,11 @@ const Tokenizer = struct {
             o.* = tok.pos;
             t.* = (tok.next() catch unreachable) orelse unreachable;
         }
-        return .{ stream, offsets };
+        return .{
+            .code = code,
+            .tokens = stream,
+            .offsets = offsets,
+        };
     }
 
     pub fn next(tok: *Tokenizer) error{ SyntaxError, InvalidNumber, OutOfMemory }!?Token {
