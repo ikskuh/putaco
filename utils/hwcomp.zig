@@ -35,197 +35,196 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("syntax error in {}:{}\n", .{ line, col });
     }
 
-    var interfaces: std.AutoHashMapUnmanaged(String, *Interface) = .empty;
-    defer interfaces.deinit(gpa);
+    var compiler: Compiler = .{ .arena = arena };
+    defer compiler.deinit(gpa);
 
-    var instances: std.AutoArrayHashMapUnmanaged(String, *Instance) = .empty;
-    defer instances.deinit(gpa);
-
-    var wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty;
-    defer wires.deinit(gpa);
-
-    var constants: ConstMap = .empty;
-    defer constants.deinit(gpa);
-
-    var assignments: std.ArrayList(Assignment) = .empty;
-    defer assignments.deinit(gpa);
-
-    while (!parser.eof()) {
-        std.log.info("top level {?f}", .{parser.peek()});
-        if (parser.try_take(.kw_component)) {
-            const intf = try parser.take_interface(arena, .component);
-
-            const gop = try interfaces.getOrPut(gpa, intf.name);
-            if (gop.found_existing) {
-                std.log.err("duplicate intf: {f}", .{intf.name});
-                return 1;
-            }
-            gop.value_ptr.* = try arena.create(Interface);
-            gop.value_ptr.*.* = intf;
-        } else if (parser.try_take(.kw_port)) {
-            // ports directly create instances, not interfaces
-            const intf = try parser.take_interface(arena, .port);
-
-            const gop = try instances.getOrPut(gpa, intf.name);
-            if (gop.found_existing) {
-                std.log.err("duplicate port/instance: {f}", .{intf.name});
-                return 1;
-            }
-            gop.value_ptr.* = try arena.create(Instance);
-            gop.value_ptr.*.* = .{
-                .interface = try arena.create(Interface),
-                .multiplicity = null, // TODO: Allow port multiplicity?
-            };
-            gop.value_ptr.*.interface.* = intf;
-        } else if (parser.try_take(.kw_instance)) {
-            const name = try parser.take(.identifier);
-
-            var multiplicity: ?u32 = null;
-            if (parser.try_take(.@"[")) {
-                multiplicity = try parser.take(.integer);
-                if (multiplicity.? <= 1) {
-                    std.log.err("instance multiplicity must be at least 2!", .{});
-                    return 1;
-                }
-                try parser.take(.@"]");
-            }
-
-            try parser.take(.@"=");
-            const type_name = try parser.take(.identifier);
-
-            if (wires.get(name) != null) {
-                std.log.err("conflict: wire {f} already exists", .{name});
-                return 1;
-            }
-
-            const intf = interfaces.get(type_name) orelse {
-                std.log.err("unknown interface {f}", .{type_name});
-                return 1;
-            };
-
-            const gop = try instances.getOrPut(gpa, name);
-            if (gop.found_existing) {
-                std.log.err("duplicate instance: {f}", .{name});
-                return 1;
-            }
-            gop.value_ptr.* = try arena.create(Instance);
-            gop.value_ptr.*.* = .{
-                .interface = intf,
-                .multiplicity = multiplicity,
-            };
-        } else if (parser.try_take(.kw_wire)) {
-            const rref = try parser.take_rref();
-            if (instances.get(rref.name) != null) {
-                std.log.err("conflict: instance {f} already exists", .{rref.name});
-                return 1;
-            }
-
-            const gop = try wires.getOrPut(gpa, rref.name);
-            if (gop.found_existing) {
-                std.log.err("duplicate wire: {f}", .{rref.name});
-                return 1;
-            }
-            gop.value_ptr.* = .{
-                .name = rref.name,
-                .width = switch (rref.access) {
-                    .full => 1,
-                    .index, .broadcast => return error.SyntaxError,
-                    .range => |r| r.width(),
-                },
-            };
-        } else if (parser.try_take(.kw_const)) {
-            const name = try parser.take(.identifier);
-
-            try parser.take(.@"=");
-
-            const value = try parser.take(.integer);
-            const gop = try constants.getOrPut(gpa, name);
-            if (gop.found_existing) {
-                std.log.err("duplicate constant: {f}", .{name});
-                return 1;
-            }
-            gop.value_ptr.* = value;
-        } else if (parser.can_take(.identifier)) {
-            const ref = try parser.take_ref();
-
-            try parser.take(.@"<=");
-
-            const expr = try parser.parse_expr(arena);
-
-            try assignments.append(gpa, .{
-                .target = ref,
-                .source = expr,
-            });
-
-            switch (ref) {
-                .instance => |_iref| {
-                    const iref, const sref = _iref;
-
-                    const inst = instances.get(iref.name) orelse {
-                        std.log.err("undeclared instance {f}", .{iref.name});
-                        return 1;
-                    };
-
-                    switch (iref.access) {
-                        .singleton => if (inst.multiplicity != null) {
-                            std.log.err("{f}: apply broadcast or indexing to multi-instances", .{iref.name});
-                            return 1;
-                        },
-                        .broadcast => if (inst.multiplicity == null) {
-                            std.log.err("{f}: broadcast can only be applied to multi-instances", .{iref.name});
-                            return 1;
-                        },
-                        .indexed => |index| if (inst.multiplicity) |limit| {
-                            const idx = try index.resolve(&constants);
-                            if (idx >= limit) {
-                                std.log.err("{f}: index {} is out of range for {} instances", .{
-                                    iref.name,
-                                    idx,
-                                    limit,
-                                });
-                                return 1;
-                            }
-                        } else {
-                            std.log.err("indexing can only be applied to multi-instances", .{});
-                            return 1;
-                        },
-                    }
-
-                    const port = inst.interface.ports.get(sref.name) orelse {
-                        std.log.err("component {f} (via instance {f}) has no port {f}", .{
-                            iref.name,
-                            inst.interface.name,
-                            sref.name,
-                        });
-                        return 1;
-                    };
-
-                    if (!try sref.is_valid_for_width(&constants, port.width)) {
-                        std.log.err("out of bounds access for port {f}:{f}", .{ iref.name, port.name });
-                        return 1;
-                    }
-                },
-
-                .wire => |wref| {
-                    const wire = wires.get(wref.name) orelse {
-                        std.log.err("undeclared wire {f}", .{wref.name});
-                        return 1;
-                    };
-
-                    if (!try wref.is_valid_for_width(&constants, wire.width)) {
-                        std.log.err("out of bounds access for wire {f}", .{wire.name});
-                        return 1;
-                    }
-                },
-            }
-        } else {
-            std.log.err("unexpected token {?f}", .{parser.peek()});
-            return error.SyntaxError;
-        }
-    }
+    try compiler.compile(gpa, &parser);
 
     return 0;
 }
+
+const Compiler = struct {
+    arena: std.mem.Allocator,
+    interfaces: std.AutoHashMapUnmanaged(String, *Interface) = .empty,
+    instances: std.AutoArrayHashMapUnmanaged(String, *Instance) = .empty,
+    wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty,
+    constants: ConstMap = .empty,
+    assignments: std.ArrayList(Assignment) = .empty,
+
+    pub fn deinit(cc: *Compiler, gpa: std.mem.Allocator) void {
+        cc.instances.deinit(gpa);
+        cc.interfaces.deinit(gpa);
+        cc.wires.deinit(gpa);
+        cc.constants.deinit(gpa);
+        cc.assignments.deinit(gpa);
+        cc.* = undefined;
+    }
+
+    pub fn throw_error(cc: *Compiler, parser: *Parser, comptime fmt: []const u8, args: anytype) error{SemanticError} {
+        _ = cc;
+        _ = parser;
+        std.log.err(fmt, args);
+        return error.SemanticError;
+    }
+
+    pub fn compile(cc: *Compiler, gpa: std.mem.Allocator, parser: *Parser) !void {
+        while (!parser.eof()) {
+            std.log.info("top level {?f}", .{parser.peek()});
+            if (parser.try_take(.kw_component)) {
+                const intf = try parser.take_interface(cc.arena, .component);
+
+                const gop = try cc.interfaces.getOrPut(gpa, intf.name);
+                if (gop.found_existing) {
+                    return cc.throw_error(parser, "duplicate intf: {f}", .{intf.name});
+                }
+                gop.value_ptr.* = try cc.arena.create(Interface);
+                gop.value_ptr.*.* = intf;
+            } else if (parser.try_take(.kw_port)) {
+                // ports directly create instances, not interfaces
+                const intf = try parser.take_interface(cc.arena, .port);
+
+                const gop = try cc.instances.getOrPut(gpa, intf.name);
+                if (gop.found_existing) {
+                    return cc.throw_error(parser, "duplicate port/instance: {f}", .{intf.name});
+                }
+                gop.value_ptr.* = try cc.arena.create(Instance);
+                gop.value_ptr.*.* = .{
+                    .interface = try cc.arena.create(Interface),
+                    .multiplicity = null, // TODO: Allow port multiplicity?
+                };
+                gop.value_ptr.*.interface.* = intf;
+            } else if (parser.try_take(.kw_instance)) {
+                const name = try parser.take(.identifier);
+
+                var multiplicity: ?u32 = null;
+                if (parser.try_take(.@"[")) {
+                    multiplicity = try parser.take(.integer);
+                    if (multiplicity.? <= 1) {
+                        return cc.throw_error(parser, "instance multiplicity must be at least 2!", .{});
+                    }
+                    try parser.take(.@"]");
+                }
+
+                try parser.take(.@"=");
+                const type_name = try parser.take(.identifier);
+
+                if (cc.wires.get(name) != null) {
+                    return cc.throw_error(parser, "conflict: wire {f} already exists", .{name});
+                }
+
+                const intf = cc.interfaces.get(type_name) orelse {
+                    return cc.throw_error(parser, "unknown interface {f}", .{type_name});
+                };
+
+                const gop = try cc.instances.getOrPut(gpa, name);
+                if (gop.found_existing) {
+                    return cc.throw_error(parser, "duplicate instance: {f}", .{name});
+                }
+                gop.value_ptr.* = try cc.arena.create(Instance);
+                gop.value_ptr.*.* = .{
+                    .interface = intf,
+                    .multiplicity = multiplicity,
+                };
+            } else if (parser.try_take(.kw_wire)) {
+                const rref = try parser.take_rref();
+                if (cc.instances.get(rref.name) != null) {
+                    return cc.throw_error(parser, "conflict: instance {f} already exists", .{rref.name});
+                }
+
+                const gop = try cc.wires.getOrPut(gpa, rref.name);
+                if (gop.found_existing) {
+                    return cc.throw_error(parser, "duplicate wire: {f}", .{rref.name});
+                }
+                gop.value_ptr.* = .{
+                    .name = rref.name,
+                    .width = switch (rref.access) {
+                        .full => 1,
+                        .index, .broadcast => return error.SyntaxError,
+                        .range => |r| r.width(),
+                    },
+                };
+            } else if (parser.try_take(.kw_const)) {
+                const name = try parser.take(.identifier);
+
+                try parser.take(.@"=");
+
+                const value = try parser.take(.integer);
+                const gop = try cc.constants.getOrPut(gpa, name);
+                if (gop.found_existing) {
+                    return cc.throw_error(parser, "duplicate constant: {f}", .{name});
+                }
+                gop.value_ptr.* = value;
+            } else if (parser.can_take(.identifier)) {
+                const ref = try parser.take_ref();
+
+                try parser.take(.@"<=");
+
+                const expr = try parser.parse_expr(cc.arena);
+
+                try cc.assignments.append(gpa, .{
+                    .target = ref,
+                    .source = expr,
+                });
+
+                switch (ref) {
+                    .instance => |_iref| {
+                        const iref, const sref = _iref;
+
+                        const inst = cc.instances.get(iref.name) orelse {
+                            return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
+                        };
+
+                        switch (iref.access) {
+                            .singleton => if (inst.multiplicity != null) {
+                                return cc.throw_error(parser, "{f}: apply broadcast or indexing to multi-instances", .{iref.name});
+                            },
+                            .broadcast => if (inst.multiplicity == null) {
+                                return cc.throw_error(parser, "{f}: broadcast can only be applied to multi-instances", .{iref.name});
+                            },
+                            .indexed => |index| if (inst.multiplicity) |limit| {
+                                const idx = try index.resolve(&cc.constants);
+                                if (idx >= limit) {
+                                    return cc.throw_error(parser, "{f}: index {} is out of range for {} instances", .{
+                                        iref.name,
+                                        idx,
+                                        limit,
+                                    });
+                                }
+                            } else {
+                                return cc.throw_error(parser, "indexing can only be applied to multi-instances", .{});
+                            },
+                        }
+
+                        const port = inst.interface.ports.get(sref.name) orelse {
+                            return cc.throw_error(parser, "component {f} (via instance {f}) has no port {f}", .{
+                                iref.name,
+                                inst.interface.name,
+                                sref.name,
+                            });
+                        };
+
+                        if (!try sref.is_valid_for_width(&cc.constants, port.width)) {
+                            return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
+                        }
+                    },
+
+                    .wire => |wref| {
+                        const wire = cc.wires.get(wref.name) orelse {
+                            return cc.throw_error(parser, "undeclared wire {f}", .{wref.name});
+                        };
+
+                        if (!try wref.is_valid_for_width(&cc.constants, wire.width)) {
+                            return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
+                        }
+                    },
+                }
+            } else {
+                std.log.err("unexpected token {?f}", .{parser.peek()});
+                return error.SyntaxError;
+            }
+        }
+    }
+};
 
 const Assignment = struct {
     target: Reference,
