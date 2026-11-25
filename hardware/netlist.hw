@@ -169,14 +169,14 @@ wire: OPCODE_JZ#
 wire: OPCODE_JNZ#
 wire: OPCODE_DJNZ#
 
-wire: BUS
+wire: BUS[7:0]
 
 wire: ACC_BANK_A#
 wire: ACC_BANK_B#
 
-wire: ACC
-wire: IR
-wire: OP
+wire: ACC[7:0]
+wire: IR[7:0]
+wire: OP[7:0]
 
 wire: TRIG_EXEC
 wire: OE#
@@ -261,7 +261,7 @@ OPCODE_JZ#      <= OPCMUX.Y#[5]
 OPCODE_JNZ#     <= OPCMUX.Y#[6]
 OPCODE_DJNZ#    <= OPCMUX.Y#[7]
 
-BUS             <= ALU.DATA ~ MEM.DATA ~ OP_BUF.Q ~ ACC_BUF.Q ~ R'LLLLLLLL'     (* tristate join *)
+BUS             <= ALU.DQ ~ MEM.DATA ~ OP_BUF.Y ~ ACC_BUF.Y ~ R'LLLLLLLL'     (* tristate join *)
 
 IR_FF[0].D      <= CODE.DATA[3:0]
 IR_FF[1].D      <= { 'L', CODE.DATA[6:4] }
@@ -292,7 +292,7 @@ OP_FF[*].OE2#   <= 'L'
 
 OP              <= { OP_FF[1].Q, OP_FF[0].Q }
 
-OP_BUF.A        <= OP.Q
+OP_BUF.A        <= OP
 OP_BUF.OE#      <= OPCODE_SET#
 OP_BUF.OE2#     <= OE#
 
@@ -320,7 +320,7 @@ ACC_B[*].CP     <= WE#
 ACC_B[*].OE#    <= ACC_BANK_B#
 ACC_B[*].OE2#   <= STATE_FI                 (* prevent glitching when fetching new state *)
 
-ACC             <= ACC_A ~ ACC_B ~ R'LLLLLLLL'  (* tristate join of both accumulators *)
+ACC             <= { ACC_A[1].Q, ACC_A[0].Q } ~ { ACC_B[1].Q, ACC_B[0].Q } ~ R'LLLLLLLL'  (* tristate join of both accumulators *)
 
 ACC_BUF.A       <= ACC
 ACC_BUF.OE#     <= OPCODE_ST#
@@ -337,11 +337,11 @@ AND4_1.D[1]     <= 'H'
 MEM.CS#         <= AND4_1.Y[1]
 MEM.OE#         <= (AND2.Y[2]   | OE#) ~ R'L'   (* diode or for glitchless operation *)
 MEM.WE#         <= (OPCODE_ST#  | WE#) ~ R'L'   (* diode or for glitchless operation *)
-MEM.ADDR        <= OP.Q
+MEM.ADDR        <= OP
 
 ALUMUX[*].OE#   <= OPCODE_ALU#
 ALUMUX[*].OE2#  <= OE#
-ALUMUX[0].A     <= OP.Q
+ALUMUX[0].A     <= OP
 ALUMUX[1].A     <= { 'LLLLL', IR[2:0] }
 
 AND2.A[3]       <= OPCODE_ALU#

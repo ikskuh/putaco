@@ -215,30 +215,55 @@ const Compiler = struct {
     }
 
     fn validate_assignment(cc: *Compiler, parser: *Parser, assignment: Assignment) !void {
-        try cc.validate_ref(parser, assignment.target, .assignment);
+        const dst_width = try cc.validate_ref(parser, assignment.target, .assignment);
 
-        try cc.validate_expr(parser, assignment.source);
-    }
+        const src_width = try cc.validate_expr(parser, assignment.source);
 
-    fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression) !void {
-        switch (expr.*) {
-            .hardwired => {}, // always ok
-            .resistors => {}, // always ok
-            .reference => |ref| try cc.validate_ref(parser, ref, .expression),
-
-            .concat => |sequence| for (sequence) |*child| {
-                try cc.validate_expr(parser, child);
-            },
-
-            .joined, .diode_or, .diode_and => |siblings| for (siblings) |*sibling| {
-                try cc.validate_expr(parser, sibling);
-            },
-
-            .inverted => |child| try cc.validate_expr(parser, child),
+        if (dst_width != src_width) {
+            return cc.throw_error(parser, "assignment width mismatch. expected {} bits, but got {}", .{
+                dst_width,
+                src_width,
+            });
         }
     }
 
-    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: enum { assignment, expression }) !void {
+    fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression) !u32 {
+        return switch (expr.*) {
+            .hardwired => |logic| logic.width, // always ok
+            .resistors => |logic| logic.width, // always ok
+            .reference => |ref| try cc.validate_ref(parser, ref, .expression),
+
+            .concat => |sequence| {
+                var width: u32 = 0;
+                for (sequence) |*child| {
+                    width += try cc.validate_expr(parser, child);
+                }
+                return width;
+            },
+
+            .joined, .diode_or, .diode_and => |siblings| {
+                var width: u32 = undefined;
+                for (siblings, 0..) |*sibling, i| {
+                    const w = try cc.validate_expr(parser, sibling);
+                    if (i == 0) {
+                        width = w;
+                    }
+                    if (w != width) {
+                        return cc.throw_error(parser, "network size mismatch: expected {}, found {}", .{
+                            width,
+                            w,
+                        });
+                    }
+                }
+                std.debug.assert(width > 0);
+                return width;
+            },
+
+            .inverted => |child| return try cc.validate_expr(parser, child),
+        };
+    }
+
+    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: enum { assignment, expression }) !u32 {
         switch (ref) {
             .instance => |_iref| {
                 const iref, const sref = _iref;
@@ -282,6 +307,8 @@ const Compiler = struct {
                 if (!try sref.is_valid_for_width(&cc.constants, port.width)) {
                     return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
                 }
+
+                return try sref.get_width(port.width);
             },
 
             .wire => |wref| {
@@ -292,6 +319,8 @@ const Compiler = struct {
                 if (!try wref.is_valid_for_width(&cc.constants, wire.width)) {
                     return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
                 }
+
+                return wref.get_width(wire.width);
             },
         }
     }
@@ -359,7 +388,7 @@ const Logic = struct {
         };
         for (str, 0..) |c, i| {
             const level = Tokenizer.logic_to_bit(c) orelse return error.InvalidChar;
-            logic.bits.setValue(i, level != 0);
+            logic.bits.setValue(logic.width - i - 1, level != 0);
         }
         return logic;
     }
@@ -416,6 +445,14 @@ const SignalRef = struct {
         index: Index,
         range: BitRange,
     },
+
+    pub fn get_width(ref: SignalRef, port_width: u32) !u32 {
+        return switch (ref.access) {
+            .full => port_width,
+            .index => return 1, // always a single bit wide
+            .range => |r| return r.width(),
+        };
+    }
 
     pub fn is_valid_for_width(ref: SignalRef, consts: *const ConstMap, width: u32) !bool {
         return switch (ref.access) {
