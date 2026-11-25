@@ -212,7 +212,27 @@ const Compiler = struct {
             }
         }
 
+        try cc.validate_all_ports_connected();
+
         try cc.validate_all_ports_assigned();
+    }
+
+    fn validate_all_ports_connected(cc: *Compiler) !void {
+        for (cc.instances.keys(), cc.instances.values()) |instance_name, instance| {
+            for (instance.devices, 0..) |device, device_id| {
+                for (device.ports.keys(), device.ports.values()) |port_name, *port| {
+                    for (0..port.interface.width) |bit_index| {
+                        const connected = port.connected.isSet(bit_index);
+                        if (!connected) {
+                            std.log.warn("{f}[{d}].{f}[{}] is a dangling pin and is not connected to another signal.", .{
+                                instance_name, device_id,
+                                port_name,     bit_index,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn validate_all_ports_assigned(cc: *Compiler) !void {
@@ -361,7 +381,10 @@ const Compiler = struct {
                     .singleton, .broadcast => for (inst.devices) |*device| {
                         const dev_port = device.ports.getPtr(port.name).?;
                         switch (context) {
-                            .assignment => range.set_bits(&dev_port.assigned),
+                            .assignment => {
+                                range.set_bits(&dev_port.assigned);
+                                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
+                            },
                             .expression => range.set_bits(&dev_port.connected),
                         }
                     },
@@ -369,7 +392,10 @@ const Compiler = struct {
                         const idx = try index.resolve(&cc.constants);
                         const dev_port = inst.devices[idx].ports.getPtr(port.name).?;
                         switch (context) {
-                            .assignment => range.set_bits(&dev_port.assigned),
+                            .assignment => {
+                                range.set_bits(&dev_port.assigned);
+                                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
+                            },
                             .expression => range.set_bits(&dev_port.connected),
                         }
                     },
