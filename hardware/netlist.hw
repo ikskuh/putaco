@@ -398,3 +398,8 @@ OE#             <= TIM1.1Q#                                     (* posedge(CLK),
 WE#             <= TIM1.2Q#                                     (* posedge(CLK),  negedge(ADV) when state in {IO,EX} *)
 CLK             <= WE#                                          (* we just "rename" the signal here *)
 ADV             <= TIM2.1Q                                      (* posedge(OE#) *)
+
+unconnected: ALUMUX[1].Y[7:3], AND_MUX.Y[3:2]
+unconnected: TIM1.1Q,  TIM1.2Q
+unconnected: TIM2.1Q#, TIM2.2Q#
+unconnected: STATE_FF.Q[0]

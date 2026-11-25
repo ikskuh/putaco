@@ -206,6 +206,17 @@ const Compiler = struct {
                 try cc.validate_assignment(parser, assignment);
 
                 try cc.assignments.append(gpa, assignment);
+            } else if (parser.try_take(.kw_unconnected)) {
+                // mark individual signals as ignored
+
+                while (true) {
+                    const ref = try parser.take_ref();
+
+                    try cc.mark_unconnected(parser, ref);
+
+                    if (!parser.try_take(.@","))
+                        break;
+                }
             } else {
                 std.log.err("unexpected token {?f}", .{parser.peek()});
                 return error.SyntaxError;
@@ -217,13 +228,88 @@ const Compiler = struct {
         try cc.validate_all_ports_assigned();
     }
 
+    fn mark_unconnected(cc: *Compiler, parser: *Parser, ref: Reference) !void {
+        switch (ref) {
+            .wire => std.log.err("cannot mark wire as unused", .{}),
+            .instance => |_instance| {
+                const iref, const sref = _instance;
+
+                const inst: *Instance = cc.instances.get(iref.name) orelse {
+                    return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
+                };
+
+                switch (iref.access) {
+                    .singleton => if (inst.multiplicity != null) {
+                        return cc.throw_error(parser, "{f}: apply broadcast or indexing to multi-instances", .{iref.name});
+                    },
+                    .broadcast => if (inst.multiplicity == null) {
+                        return cc.throw_error(parser, "{f}: broadcast can only be applied to multi-instances", .{iref.name});
+                    },
+                    .indexed => |index| if (inst.multiplicity) |limit| {
+                        const idx = try index.resolve(&cc.constants);
+                        if (idx >= limit) {
+                            return cc.throw_error(parser, "{f}: index {} is out of range for {} instances", .{
+                                iref.name,
+                                idx,
+                                limit,
+                            });
+                        }
+                    } else {
+                        return cc.throw_error(parser, "indexing can only be applied to multi-instances", .{});
+                    },
+                }
+
+                const port: *const Port = inst.interface.ports.getPtr(sref.name) orelse {
+                    return cc.throw_error(parser, "component {f} (via instance {f}) has no port {f}", .{
+                        inst.interface.name,
+                        iref.name,
+                        sref.name,
+                    });
+                };
+
+                if (!try sref.is_valid_for_width(&cc.constants, port.width)) {
+                    return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
+                }
+
+                const range = try sref.get_range(&cc.constants, port.width);
+
+                switch (iref.access) {
+                    .singleton, .broadcast => for (inst.devices) |*device| {
+                        const dev_port = device.ports.getPtr(port.name).?;
+                        try cc.mark_range_unconnected(inst, dev_port, range);
+                    },
+                    .indexed => |index| {
+                        const idx = try index.resolve(&cc.constants);
+                        const dev_port = inst.devices[idx].ports.getPtr(port.name).?;
+                        try cc.mark_range_unconnected(inst, dev_port, range);
+                    },
+                }
+            },
+        }
+    }
+
+    fn mark_range_unconnected(cc: *Compiler, inst: *const Instance, port: *Instance.DevicePort, range: BitRange) !void {
+        _ = cc;
+
+        for (range.low..range.high + 1) |i| {
+            if (port.connected.isSet(i)) {
+                std.log.err("{f}.{f}[{}] cannot be marked as unconnected, as it is used in a signal.", .{ inst.interface.name, port.interface.name, i });
+            }
+            if (port.unconnected.isSet(i)) {
+                std.log.err("{f}.{f}[{}] is already marked as unconnected.", .{ inst.interface.name, port.interface.name, i });
+            }
+        }
+        range.set_bits(&port.unconnected);
+    }
+
     fn validate_all_ports_connected(cc: *Compiler) !void {
         for (cc.instances.keys(), cc.instances.values()) |instance_name, instance| {
             for (instance.devices, 0..) |device, device_id| {
                 for (device.ports.keys(), device.ports.values()) |port_name, *port| {
                     for (0..port.interface.width) |bit_index| {
                         const connected = port.connected.isSet(bit_index);
-                        if (!connected) {
+                        const unconnected = port.unconnected.isSet(bit_index);
+                        if (!connected and !unconnected) {
                             std.log.warn("{f}[{d}].{f}[{}] is a dangling pin and is not connected to another signal.", .{
                                 instance_name, device_id,
                                 port_name,     bit_index,
@@ -440,6 +526,14 @@ const Compiler = struct {
 
         const props = inst.get_pin_props(dev_port);
 
+        range.set_bits(&dev_port.connected); // a pin is also connected when driven.
+
+        for (range.low..range.high + 1) |i| {
+            if (dev_port.unconnected.isSet(i)) {
+                std.log.err("{f}.{f}[{}] is marked as unconnected.", .{ inst.interface.name, dev_port.interface.name, i });
+            }
+        }
+
         switch (context) {
             .assignment => {
                 std.debug.assert(!bus_joined); // LHS can never be bus-joined
@@ -451,8 +545,6 @@ const Compiler = struct {
                 }
 
                 range.set_bits(&dev_port.assigned);
-
-                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
 
                 if (!props.interprets) {
                     std.log.err("{f}.{f}{f} is not a suitable input signal", .{ inst.interface.name, dev_port.interface.name, range });
@@ -483,8 +575,6 @@ const Compiler = struct {
                         range.set_bits(&dev_port.assigned);
                     }
                 }
-
-                range.set_bits(&dev_port.connected);
 
                 if (!props.can_drive) {
                     std.log.err("{f}.{f}{f} cannot drive other signals.", .{ inst.interface.name, dev_port.interface.name, range });
@@ -637,6 +727,9 @@ const Instance = struct {
 
         // Each bit marks if a port signal was connected to another port.
         connected: std.bit_set.Integer(64) = .empty,
+
+        // Each bit marks if the signal is intentionally unconnected.
+        unconnected: std.bit_set.Integer(64) = .empty,
     };
 };
 
@@ -1174,6 +1267,7 @@ const Tokenizer = struct {
                         wire,
                         tristate,
                         @"const",
+                        unconnected,
                     };
 
                     const kw = std.meta.stringToEnum(Keyword, str) orelse {
@@ -1191,6 +1285,7 @@ const Tokenizer = struct {
                         .instance => .kw_instance,
                         .port => .kw_port,
                         .@"const" => .kw_const,
+                        .unconnected => .kw_unconnected,
                     };
                 }
 
@@ -1365,6 +1460,7 @@ const Token = union(enum) {
     kw_instance,
     kw_wire,
     kw_const,
+    kw_unconnected,
 
     pub fn format(t: Token, writer: *std.Io.Writer) !void {
         switch (t) {
@@ -1381,6 +1477,7 @@ const Token = union(enum) {
             .kw_instance,
             .kw_wire,
             .kw_const,
+            .kw_unconnected,
             => try writer.print("Token({s}:)", .{@tagName(t)[3..]}),
             else => {
                 try writer.print("Token({t})", .{t});
