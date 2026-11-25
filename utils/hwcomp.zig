@@ -420,7 +420,7 @@ const Compiler = struct {
             .assignment => {
                 for (range.low..range.high + 1) |i| {
                     if (dev_port.assigned.isSet(i)) {
-                        std.log.err("{f}.{f}{f} has multiple assigned drivers", .{ inst.interface.name, dev_port.interface.name, range });
+                        std.log.err("{f}.{f}[{}] has multiple assigned drivers", .{ inst.interface.name, dev_port.interface.name, i });
                     }
                 }
 
