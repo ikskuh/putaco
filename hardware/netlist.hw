@@ -350,8 +350,8 @@ AND2.B[3]       <= OPCODE_DJNZ#
 ALU.A[18:16]    <= ALUMUX[1].Y[2:0] ~ R'LLH'        (* buffer + resistor bias => mux 2:1 *)
 ALU.A[15: 8]    <= ACC
 ALU.A[ 7: 0]    <= ALUMUX[0].Y[7:0] ~ R'LLLLLLLH'   (* buffer + resistor bias => mux 2:1 *)
-ALU.OE#         <= OE#                          (* rewrite to pure output enable)
-ALU.CS#         <= AND2.Y[3]                    (* statically select the ALU in EX state *)
+ALU.OE#         <= OE#                              (* rewrite to pure output enable *)
+ALU.CE#         <= AND2.Y[3]                        (* statically select the ALU in EX state *)
 ALU.WE#         <= 'H'
 
 NOT.A[5]        <= OPCODE_DJNZ#                     (* make positive logic *)
@@ -386,7 +386,7 @@ TIM1.2R#        <= 'H'
 
 (* configured for 10 us operation *)
 TIM2.1A#        <= 'L'
-TIM2.1B         <= OE#                                          (* ADV triggers on OE# )
+TIM2.1B         <= OE#                                          (* ADV triggers on OE# *)
 TIM2.1R#        <= 'H'
 
 (* we use the TIM2.2 as a "edge inverter", which triggers with a really short pulse *)

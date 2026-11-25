@@ -1114,6 +1114,12 @@ const Tokenizer = struct {
         }
         if (std.mem.startsWith(u8, tok.code[tok.pos..], "(*")) {
             const end = std.mem.indexOfPos(u8, tok.code, tok.pos, "*)") orelse return error.SyntaxError;
+
+            if (std.mem.indexOfPos(u8, tok.code[tok.pos..end], 2, "(*")) |nested_start| {
+                _ = nested_start; // TODO: Emit error at correct position
+                return error.SyntaxError;
+            }
+
             tok.pos = end + 2;
             return tok.skip_whitespace();
         }
