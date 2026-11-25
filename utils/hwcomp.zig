@@ -38,6 +38,14 @@ pub fn main(init: std.process.Init) !u8 {
 
     try compiler.compile(gpa, &parser);
 
+    std.log.info("components:       {d: >3}", .{compiler.stats.components});
+    std.log.info("instances:        {d: >3}", .{compiler.stats.instances});
+    std.log.info("internal pins:    {d: >3}", .{compiler.stats.internal_pins});
+    std.log.info("external pins:    {d: >3}", .{compiler.stats.external_pins});
+    std.log.info("unconnected pins: {d: >3}", .{compiler.stats.unconnected_pins});
+    std.log.info("resistors:        {d: >3}", .{compiler.stats.resistors});
+    std.log.info("inverters:        {d: >3}", .{compiler.stats.inverters});
+
     return 0;
 }
 
@@ -74,6 +82,16 @@ const LineInfo = struct {
     column: u32,
 };
 
+const Statistics = struct {
+    components: usize = 0,
+    instances: usize = 0,
+    internal_pins: usize = 0,
+    external_pins: usize = 0,
+    unconnected_pins: usize = 0,
+    resistors: usize = 0,
+    inverters: usize = 0,
+};
+
 const Compiler = struct {
     arena: std.mem.Allocator,
     interfaces: std.AutoHashMapUnmanaged(String, *Interface) = .empty,
@@ -81,6 +99,7 @@ const Compiler = struct {
     wires: std.AutoArrayHashMapUnmanaged(String, Wire) = .empty,
     constants: ConstMap = .empty,
     assignments: std.ArrayList(Assignment) = .empty,
+    stats: Statistics = .{},
 
     pub fn deinit(cc: *Compiler, gpa: std.mem.Allocator) void {
         cc.instances.deinit(gpa);
@@ -134,6 +153,10 @@ const Compiler = struct {
                 intf_ptr.* = intf;
 
                 gop.value_ptr.* = try Instance.create(cc.arena, intf.name, intf_ptr, null);
+
+                for (intf.ports.values()) |port| {
+                    cc.stats.external_pins += port.width;
+                }
             } else if (parser.try_take(.kw_instance)) {
                 const name = try parser.take(.identifier);
 
@@ -162,6 +185,16 @@ const Compiler = struct {
                     return cc.throw_error(parser, "duplicate instance: {f}", .{name});
                 }
                 gop.value_ptr.* = try Instance.create(cc.arena, name, intf, multiplicity);
+
+                if (!intf.used) {
+                    intf.used = true;
+                    cc.stats.components += 1;
+                    for (intf.ports.values()) |port| {
+                        cc.stats.internal_pins += port.width;
+                    }
+                }
+
+                cc.stats.instances += multiplicity orelse 1;
             } else if (parser.try_take(.kw_wire)) {
                 const rref = try parser.take_rref();
                 if (cc.instances.get(rref.name) != null) {
@@ -289,7 +322,7 @@ const Compiler = struct {
     }
 
     fn mark_range_unconnected(cc: *Compiler, inst: *const Instance, port: *Instance.DevicePort, range: BitRange) !void {
-        _ = cc;
+        cc.stats.unconnected_pins += range.width();
 
         for (range.low..range.high + 1) |i| {
             if (port.connected.isSet(i)) {
@@ -381,10 +414,19 @@ const Compiler = struct {
     }
 
     fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression, bus_joined: bool) !u32 {
-        return switch (expr.*) {
-            .hardwired => |logic| logic.width, // always ok
-            .resistors => |logic| logic.width, // always ok
-            .reference => |ref| try cc.validate_ref(parser, ref, .expression, bus_joined),
+        switch (expr.*) {
+            .hardwired => |logic| {
+                if (bus_joined) {
+                    return cc.throw_error(parser, "cannot use hardwired logic levels inside a bus join.", .{});
+                }
+                return logic.width;
+            },
+            .resistors => |logic| { // always ok
+                cc.stats.resistors += logic.width;
+                return logic.width;
+            },
+
+            .reference => |ref| return try cc.validate_ref(parser, ref, .expression, bus_joined),
 
             .concat => |sequence| {
                 var width: u32 = 0;
@@ -396,6 +438,14 @@ const Compiler = struct {
 
             .joined, .diode_or, .diode_and => |siblings| {
                 const is_bus_join = (expr.* == .joined);
+
+                if (bus_joined) {
+                    if (is_bus_join) {
+                        std.log.err("cannot nest bus joins, just flatten the list instead.", .{});
+                    } else {
+                        return cc.throw_error(parser, "cannot use {t} operator inside a bus join.", .{expr.*});
+                    }
+                }
 
                 var width: u32 = undefined;
                 for (siblings, 0..) |*sibling, i| {
@@ -411,33 +461,16 @@ const Compiler = struct {
                     }
                 }
                 std.debug.assert(width > 0);
-                // Bus joins have additional requirements:
-                if (is_bus_join) {
-                    for (siblings) |*sibling| {
-                        switch (sibling.*) {
-                            .resistors, // ok
-                            .reference, // ok
-                            .concat,
-                            => {}, // this is ok, we forward the bus join property downwards.
-
-                            .joined => {
-                                std.log.err("cannot nest bus joins, just flatten the list instead.", .{});
-                            },
-
-                            .hardwired,
-                            .diode_or,
-                            .diode_and,
-                            .inverted,
-                            => return cc.throw_error(parser, "cannot use {t} operator inside a bus join.", .{sibling.*}),
-                        }
-                    }
-                }
 
                 return width;
             },
 
-            .inverted => |child| return try cc.validate_expr(parser, child, false),
-        };
+            .inverted => |child| {
+                const width = try cc.validate_expr(parser, child, false);
+                cc.stats.inverters += width;
+                return width;
+            },
+        }
     }
 
     const UsageContext = enum { assignment, expression };
@@ -595,6 +628,7 @@ const Interface = struct {
     name: String,
     kind: Kind,
     ports: std.AutoArrayHashMapUnmanaged(String, Port) = .empty,
+    used: bool = false,
 };
 
 const Port = struct {
