@@ -21,22 +21,22 @@ port: MEM {
 
 (* High Speed CMOS Logic Quad D-Type Flip-Flops with 3-State Outputs *)
 component: CD74HC173E {
-    input:  CP      (* update on rising edge *)
-    input:  MR      (* async reset *)
-    input:  OE#     (* both must be low to enable output *)
-    input:  OE2#    (* both must be low to enable output *)
-    input:  E1#     (* both must be low to enable update *)
-    input:  E2#     (* both must be low to enable update *)
-    input:  D[3:0]  (* input *)
-    output: Q[3:0]  (* output *)
+    input:    CP      (* update on rising edge *)
+    input:    MR      (* async reset *)
+    input:    OE#     (* both must be low to enable output *)
+    input:    OE2#    (* both must be low to enable output *)
+    input:    E1#     (* both must be low to enable update *)
+    input:    E2#     (* both must be low to enable update *)
+    input:    D[3:0]  (* input *)
+    tristate: Q[3:0]  (* output *)
 }
 
 (* 8-ch, 2-V to 6-V buffers with 3-state outputs *)
 component: CD74HC541E {
-    input:  OE#     (* both must be low to enable *)
-    input:  OE2#    (* both must be low to enable *)
-    input:  A[7:0]  (* input *)
-    output: Y[7:0]  (* output *)
+    input:    OE#     (* both must be low to enable *)
+    input:    OE2#    (* both must be low to enable *)
+    input:    A[7:0]  (* input *)
+    tristate: Y[7:0]  (* output *)
 }
 
 (* 4-ch, 2-input, 2-V to 6-V 5.2 mA drive strength AND gate *)
@@ -97,19 +97,19 @@ component: SN74HC157 {
 
 (* 8-ch, 2-V to 6-V inverters with 3-state outputs *)
 component: SN74HC540 {
-    input:  OE1#    (* Y# is Z when OE1# high *)
-    input:  OE2#    (* Y# is Z when OE2# high *)
-    input:  A[7:0]
-    output: Y#[7:0]
+    input:    OE1#    (* Y# is Z when OE1# high *)
+    input:    OE2#    (* Y# is Z when OE2# high *)
+    input:    A[7:0]
+    tristate: Y#[7:0]
 }
 
 (* NOR-Flash 512K X 8 70ns *)
 component: SST39SF040-70-4C-NHE {
-    input:  A[18:0]
-    inout:  DQ[7:0]
-    input:  CE#
-    input:  WE#
-    input:  OE#
+    input:    A[18:0]
+    tristate: DQ[7:0]
+    input:    CE#
+    input:    WE#
+    input:    OE#
 }
 
 (*******************************************

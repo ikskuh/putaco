@@ -91,14 +91,18 @@ const Compiler = struct {
         cc.* = undefined;
     }
 
-    pub fn throw_error(cc: *Compiler, parser: *Parser, comptime fmt: []const u8, args: anytype) error{SemanticError} {
+    pub fn throw_error(cc: *Compiler, maybe_parser: ?*Parser, comptime fmt: []const u8, args: anytype) error{SemanticError} {
         _ = cc;
 
-        const pos = parser.pos;
-        if (pos < parser.source.offsets.len) {
-            const line = parser.source.get_token_line_info(pos);
+        if (maybe_parser) |parser| {
+            const pos = parser.pos;
+            if (pos < parser.source.offsets.len) {
+                const line = parser.source.get_token_line_info(pos);
 
-            std.log.err("{}:{}: " ++ fmt, .{ line.line, line.column } ++ args);
+                std.log.err("{}:{}: " ++ fmt, .{ line.line, line.column } ++ args);
+            } else {
+                std.log.err(fmt, args);
+            }
         } else {
             std.log.err(fmt, args);
         }
@@ -125,12 +129,11 @@ const Compiler = struct {
                 if (gop.found_existing) {
                     return cc.throw_error(parser, "duplicate port/instance: {f}", .{intf.name});
                 }
-                gop.value_ptr.* = try cc.arena.create(Instance);
-                gop.value_ptr.*.* = .{
-                    .interface = try cc.arena.create(Interface),
-                    .multiplicity = null, // TODO: Allow port multiplicity?
-                };
-                gop.value_ptr.*.interface.* = intf;
+
+                const intf_ptr = try cc.arena.create(Interface);
+                intf_ptr.* = intf;
+
+                gop.value_ptr.* = try Instance.create(cc.arena, intf_ptr, null);
             } else if (parser.try_take(.kw_instance)) {
                 const name = try parser.take(.identifier);
 
@@ -158,11 +161,7 @@ const Compiler = struct {
                 if (gop.found_existing) {
                     return cc.throw_error(parser, "duplicate instance: {f}", .{name});
                 }
-                gop.value_ptr.* = try cc.arena.create(Instance);
-                gop.value_ptr.*.* = .{
-                    .interface = intf,
-                    .multiplicity = multiplicity,
-                };
+                gop.value_ptr.* = try Instance.create(cc.arena, intf, multiplicity);
             } else if (parser.try_take(.kw_wire)) {
                 const rref = try parser.take_rref();
                 if (cc.instances.get(rref.name) != null) {
@@ -210,6 +209,54 @@ const Compiler = struct {
             } else {
                 std.log.err("unexpected token {?f}", .{parser.peek()});
                 return error.SyntaxError;
+            }
+        }
+
+        try cc.validate_all_ports_assigned();
+    }
+
+    fn validate_all_ports_assigned(cc: *Compiler) !void {
+        for (cc.instances.keys(), cc.instances.values()) |instance_name, instance| {
+            for (instance.devices, 0..) |device, device_id| {
+                for (device.ports.keys(), device.ports.values()) |port_name, *port| {
+                    const driver_requirement = instance.get_pin_props(port);
+
+                    for (0..port.interface.width) |bit_index| {
+                        const driven = port.assigned.isSet(bit_index);
+
+                        switch (driver_requirement) {
+                            .must_not_drive => if (driven) {
+                                const _discard = cc.throw_error(null, "{f}[{d}].{f}[{}] must not be driven.", .{
+                                    instance_name, device_id,
+                                    port_name,     bit_index,
+                                });
+                                switch (_discard) {
+                                    error.SemanticError => {},
+                                }
+                            },
+
+                            .needs_driver => if (!driven) {
+                                const _discard = cc.throw_error(null, "{f}[{d}].{f}[{}] must be driven by another signal.", .{
+                                    instance_name, device_id,
+                                    port_name,     bit_index,
+                                });
+                                switch (_discard) {
+                                    error.SemanticError => {},
+                                }
+                            },
+
+                            .should_have_driver => if (!driven) {
+                                std.log.warn("{f}[{d}].{f}[{}] should be driven by another signal.", .{
+                                    instance_name, device_id,
+                                    port_name,     bit_index,
+                                });
+                            },
+
+                            // Just happily ignore these pins:
+                            .may_have_driver => {},
+                        }
+                    }
+                }
             }
         }
     }
@@ -339,15 +386,90 @@ const Interface = struct {
     ports: std.AutoArrayHashMapUnmanaged(String, Port) = .empty,
 };
 
-const Instance = struct {
-    interface: *Interface,
-    multiplicity: ?u32,
-};
-
 const Port = struct {
     name: String,
     width: u32,
     dir: Direction,
+};
+
+const Instance = struct {
+    interface: *const Interface,
+    multiplicity: ?u32,
+
+    devices: []Device,
+
+    pub fn create(arena: std.mem.Allocator, interface: *const Interface, multiplicity: ?u32) !*Instance {
+        const inst = try arena.create(Instance);
+        errdefer arena.destroy(inst);
+
+        inst.* = .{
+            .interface = interface,
+            .multiplicity = multiplicity,
+            .devices = try arena.alloc(Device, multiplicity orelse 1),
+        };
+
+        for (inst.devices) |*device| {
+            device.* = .{};
+            try device.ports.ensureTotalCapacity(arena, interface.ports.count());
+            for (interface.ports.keys(), interface.ports.values()) |key, *value| {
+                device.ports.putAssumeCapacityNoClobber(key, .{
+                    .interface = value, // we can safely store the Interface-internal ref here as the interface won't be mutated anymore.
+                });
+            }
+        }
+
+        return inst;
+    }
+
+    pub const DriveProperties = enum {
+        /// This pin must not be driven in any case.
+        must_not_drive,
+
+        /// This pin always requires a driver.
+        needs_driver,
+
+        /// It's allowed for this pin to have a driver, but none is required.
+        /// Rationale: This is for "tristate" outputs, where the pin can receive drive in some cases, but doesn't interpret the voltage.
+        may_have_driver,
+
+        /// It's allowed to not drive this pin, but it is recommended to do it.
+        /// Rationale: An "inout" pin can consume the data in some cases.
+        should_have_driver,
+    };
+
+    pub fn get_pin_props(instance: *const Instance, port: *const DevicePort) DriveProperties {
+        return switch (instance.interface.kind) {
+            .component => switch (port.interface.dir) {
+                .out => .must_not_drive, // outputs must not have a driver
+                .in => .needs_driver, // component inputs must all have a driver assigned.
+
+                .inout => .should_have_driver, // Not every inout pin of a component needs to be treated as an input, but we should consider this
+                .tristate => .may_have_driver,
+            },
+            .port => switch (port.interface.dir) {
+                .out => .needs_driver, // outputs from our design always need a driver
+                .in => .must_not_drive, // inputs must never be driven.
+
+                .inout, .tristate => .should_have_driver, // tri-state outputs should have a driver, as otherwise they could be inputs.
+            },
+        };
+    }
+
+    /// A device is one of the elements inside an instance.
+    const Device = struct {
+        ports: std.AutoArrayHashMapUnmanaged(String, DevicePort) = .empty,
+    };
+
+    /// A device port contains information about the actual assignments/consumptions.
+    const DevicePort = struct {
+        interface: *const Port,
+
+        // Each bit marks if a port signal is assigned.
+        assigned: std.bit_set.Integer(64) = .empty,
+
+        // Each bit marks if a port signal was connected to another port.
+        connected: std.bit_set.Integer(64) = .empty,
+    };
 };
 
 const Wire = struct {
@@ -356,9 +478,37 @@ const Wire = struct {
 };
 
 const Direction = enum {
+    /// This is an input pin which never drives a signal.
     in,
+
+    /// This is an output pin which always drives a signal.
     out,
+
+    /// This is a tri-state pin which can drive the signal, and may interprets it.
     inout,
+
+    /// This is a tri-state pin which can drive the signal, and never interprets it.
+    tristate,
+
+    /// Can this direction drive a signal?
+    pub fn is_output(dir: Direction) bool {
+        return switch (dir) {
+            .in => false,
+            .out => true,
+            .inout => true,
+            .tristate => true,
+        };
+    }
+
+    /// Does this direction interpret a signal?
+    pub fn is_input(dir: Direction) bool {
+        return switch (dir) {
+            .in => true,
+            .out => false,
+            .inout => true,
+            .tristate => false,
+        };
+    }
 };
 
 const Expression = union(enum) {
@@ -608,6 +758,8 @@ const Parser = struct {
                 .out
             else if (parser.try_take(.kw_inout))
                 .inout
+            else if (parser.try_take(.kw_tristate))
+                .tristate
             else
                 return error.SyntaxError;
 
@@ -826,6 +978,7 @@ const Tokenizer = struct {
                         inout,
                         instance,
                         wire,
+                        tristate,
                         @"const",
                     };
 
@@ -840,6 +993,7 @@ const Tokenizer = struct {
                         .input => .kw_input,
                         .output => .kw_output,
                         .inout => .kw_inout,
+                        .tristate => .kw_tristate,
                         .instance => .kw_instance,
                         .port => .kw_port,
                         .@"const" => .kw_const,
@@ -1007,6 +1161,7 @@ const Token = union(enum) {
     kw_input,
     kw_output,
     kw_inout,
+    kw_tristate,
     kw_instance,
     kw_wire,
     kw_const,
@@ -1022,6 +1177,7 @@ const Token = union(enum) {
             .kw_input,
             .kw_output,
             .kw_inout,
+            .kw_tristate,
             .kw_instance,
             .kw_wire,
             .kw_const,
