@@ -315,7 +315,7 @@ const Compiler = struct {
             .instance => |_iref| {
                 const iref, const sref = _iref;
 
-                const inst = cc.instances.get(iref.name) orelse {
+                const inst: *Instance = cc.instances.get(iref.name) orelse {
                     return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
                 };
 
@@ -343,10 +343,10 @@ const Compiler = struct {
                     },
                 }
 
-                const port = inst.interface.ports.get(sref.name) orelse {
+                const port: *const Port = inst.interface.ports.getPtr(sref.name) orelse {
                     return cc.throw_error(parser, "component {f} (via instance {f}) has no port {f}", .{
-                        iref.name,
                         inst.interface.name,
+                        iref.name,
                         sref.name,
                     });
                 };
@@ -355,11 +355,31 @@ const Compiler = struct {
                     return cc.throw_error(parser, "out of bounds access for port {f}:{f}", .{ iref.name, port.name });
                 }
 
-                return try sref.get_width(port.width);
+                const range = try sref.get_range(&cc.constants, port.width);
+
+                switch (iref.access) {
+                    .singleton, .broadcast => for (inst.devices) |*device| {
+                        const dev_port = device.ports.getPtr(port.name).?;
+                        switch (context) {
+                            .assignment => range.set_bits(&dev_port.assigned),
+                            .expression => range.set_bits(&dev_port.connected),
+                        }
+                    },
+                    .indexed => |index| {
+                        const idx = try index.resolve(&cc.constants);
+                        const dev_port = inst.devices[idx].ports.getPtr(port.name).?;
+                        switch (context) {
+                            .assignment => range.set_bits(&dev_port.assigned),
+                            .expression => range.set_bits(&dev_port.connected),
+                        }
+                    },
+                }
+
+                return range.width();
             },
 
             .wire => |wref| {
-                const wire = cc.wires.get(wref.name) orelse {
+                const wire: *Wire = cc.wires.getPtr(wref.name) orelse {
                     return cc.throw_error(parser, "undeclared wire {f}", .{wref.name});
                 };
 
@@ -367,7 +387,10 @@ const Compiler = struct {
                     return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
                 }
 
-                return wref.get_width(wire.width);
+                // TODO: Mark wire bits as assigned/driven
+                const range = try wref.get_range(&cc.constants, wire.width);
+
+                return range.width();
             },
         }
     }
@@ -562,8 +585,8 @@ const Index = union(enum) {
 };
 
 const BitRange = struct {
-    low: u32,
-    high: u32,
+    low: u32, // inclusive
+    high: u32, // inclusive
 
     pub fn width(r: BitRange) u32 {
         return r.high - r.low + 1;
@@ -571,6 +594,13 @@ const BitRange = struct {
 
     pub fn is_valid_for_width(range: BitRange, w: u32) bool {
         return range.low < w and range.high < w;
+    }
+
+    pub fn set_bits(range: BitRange, set: *std.bit_set.Integer(64)) void {
+        set.setRangeValue(.{
+            .start = range.low,
+            .end = range.high + 1,
+        }, true);
     }
 };
 
@@ -601,6 +631,17 @@ const SignalRef = struct {
             .full => port_width,
             .index => return 1, // always a single bit wide
             .range => |r| return r.width(),
+        };
+    }
+
+    pub fn get_range(ref: SignalRef, consts: *const ConstMap, width: u32) !BitRange {
+        return switch (ref.access) {
+            .full => .{ .low = 0, .high = width - 1 },
+            .index => |index| blk: {
+                const i = try index.resolve(consts);
+                break :blk .{ .low = i, .high = i };
+            },
+            .range => |r| r,
         };
     }
 
