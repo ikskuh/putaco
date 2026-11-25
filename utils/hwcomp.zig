@@ -282,9 +282,9 @@ const Compiler = struct {
     }
 
     fn validate_assignment(cc: *Compiler, parser: *Parser, assignment: Assignment) !void {
-        const dst_width = try cc.validate_ref(parser, assignment.target, .assignment);
+        const dst_width = try cc.validate_ref(parser, assignment.target, .assignment, false);
 
-        const src_width = try cc.validate_expr(parser, assignment.source);
+        const src_width = try cc.validate_expr(parser, assignment.source, false);
 
         if (dst_width != src_width) {
             return cc.throw_error(parser, "assignment width mismatch. expected {} bits, but got {}", .{
@@ -294,24 +294,26 @@ const Compiler = struct {
         }
     }
 
-    fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression) !u32 {
+    fn validate_expr(cc: *Compiler, parser: *Parser, expr: *const Expression, bus_joined: bool) !u32 {
         return switch (expr.*) {
             .hardwired => |logic| logic.width, // always ok
             .resistors => |logic| logic.width, // always ok
-            .reference => |ref| try cc.validate_ref(parser, ref, .expression),
+            .reference => |ref| try cc.validate_ref(parser, ref, .expression, bus_joined),
 
             .concat => |sequence| {
                 var width: u32 = 0;
                 for (sequence) |*child| {
-                    width += try cc.validate_expr(parser, child);
+                    width += try cc.validate_expr(parser, child, bus_joined);
                 }
                 return width;
             },
 
             .joined, .diode_or, .diode_and => |siblings| {
+                const is_bus_join = (expr.* == .joined);
+
                 var width: u32 = undefined;
                 for (siblings, 0..) |*sibling, i| {
-                    const w = try cc.validate_expr(parser, sibling);
+                    const w = try cc.validate_expr(parser, sibling, is_bus_join);
                     if (i == 0) {
                         width = w;
                     }
@@ -323,16 +325,38 @@ const Compiler = struct {
                     }
                 }
                 std.debug.assert(width > 0);
+                // Bus joins have additional requirements:
+                if (is_bus_join) {
+                    for (siblings) |*sibling| {
+                        switch (sibling.*) {
+                            .resistors, // ok
+                            .reference, // ok
+                            .concat,
+                            => {}, // this is ok, we forward the bus join property downwards.
+
+                            .joined => {
+                                std.log.err("cannot nest bus joins, just flatten the list instead.", .{});
+                            },
+
+                            .hardwired,
+                            .diode_or,
+                            .diode_and,
+                            .inverted,
+                            => return cc.throw_error(parser, "cannot use {t} operator inside a bus join.", .{sibling.*}),
+                        }
+                    }
+                }
+
                 return width;
             },
 
-            .inverted => |child| return try cc.validate_expr(parser, child),
+            .inverted => |child| return try cc.validate_expr(parser, child, false),
         };
     }
 
     const UsageContext = enum { assignment, expression };
 
-    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: UsageContext) !u32 {
+    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: UsageContext, bus_joined: bool) !u32 {
         switch (ref) {
             .instance => |_iref| {
                 const iref, const sref = _iref;
@@ -382,12 +406,12 @@ const Compiler = struct {
                 switch (iref.access) {
                     .singleton, .broadcast => for (inst.devices) |*device| {
                         const dev_port = device.ports.getPtr(port.name).?;
-                        try cc.check_port_usage(inst, dev_port, range, context);
+                        try cc.check_port_usage(inst, dev_port, range, context, bus_joined);
                     },
                     .indexed => |index| {
                         const idx = try index.resolve(&cc.constants);
                         const dev_port = inst.devices[idx].ports.getPtr(port.name).?;
-                        try cc.check_port_usage(inst, dev_port, range, context);
+                        try cc.check_port_usage(inst, dev_port, range, context, bus_joined);
                     },
                 }
 
@@ -403,7 +427,7 @@ const Compiler = struct {
                     return cc.throw_error(parser, "out of bounds access for wire {f}", .{wire.name});
                 }
 
-                // TODO: Mark wire bits as assigned/driven
+                // TODO: Mark wire bits as assigned/driven, handle bus_joined?
                 const range = try wref.get_range(&cc.constants, wire.width);
 
                 return range.width();
@@ -411,13 +435,15 @@ const Compiler = struct {
         }
     }
 
-    fn check_port_usage(cc: *Compiler, inst: *Instance, dev_port: *Instance.DevicePort, range: BitRange, context: UsageContext) !void {
+    fn check_port_usage(cc: *Compiler, inst: *Instance, dev_port: *Instance.DevicePort, range: BitRange, context: UsageContext, bus_joined: bool) !void {
         _ = cc;
 
         const props = inst.get_pin_props(dev_port);
 
         switch (context) {
             .assignment => {
+                std.debug.assert(!bus_joined); // LHS can never be bus-joined
+
                 for (range.low..range.high + 1) |i| {
                     if (dev_port.assigned.isSet(i)) {
                         std.log.err("{f}.{f}[{}] has multiple assigned drivers", .{ inst.interface.name, dev_port.interface.name, i });
@@ -433,6 +459,31 @@ const Compiler = struct {
                 }
             },
             .expression => {
+                if (bus_joined) {
+                    // In a bus join, we need to check each bit for conflicting drivers,
+                    // and also validate the driver type of the port itself.
+
+                    const mark_driven = switch (dev_port.interface.dir) {
+                        .in, .out => blk: {
+                            std.log.err("{f}.{f}{f} are non-tristate signals and cannot be used in bus joins..", .{ inst.interface.name, dev_port.interface.name, range });
+                            break :blk false;
+                        },
+
+                        // these are fine in a bus join:
+                        .inout => true,
+                        .tristate => false,
+                    };
+
+                    if (mark_driven) {
+                        for (range.low..range.high + 1) |i| {
+                            if (dev_port.assigned.isSet(i)) {
+                                std.log.err("{f}.{f}[{}] has multiple assigned drivers", .{ inst.interface.name, dev_port.interface.name, i });
+                            }
+                        }
+                        range.set_bits(&dev_port.assigned);
+                    }
+                }
+
                 range.set_bits(&dev_port.connected);
 
                 if (!props.can_drive) {

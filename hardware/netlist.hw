@@ -212,7 +212,7 @@ STATE_FF.E2#    <= 'L'
 STATE_FF.D[FI]  <= STATE_EX
 STATE_FF.D[FO]  <= STATE_FI
 STATE_FF.D[IO]  <= AND2.Y[0]
-STATE_FF.D[EX]  <= (AND_MUX.Y[0] | AND_MUX.Y[1]) ~ R'L'     (* diode or, forms mux 2:1 *)
+STATE_FF.D[EX]  <= AND_MUX.Y[0] | AND_MUX.Y[1]  (* diode or, forms mux 2:1 *)
 
 STATE_FI        <= AND4_2.Y[0]      (* in theory, we could also OR the STATE_FF.D[FI] into this, but it's redundant *)
 STATE_FO        <= STATE_FF.Q[FO]
@@ -244,7 +244,7 @@ STATE_EX#       <= NOT.Y#[3]
 
 (* aliases for instructions *)
 NOT.A[4]        <= IR[3]
-OPCODE_ALU#     <= (STATE_EX# | NOT.Y#[4]) ~ R'L'       (* diode or *)
+OPCODE_ALU#     <= STATE_EX# | NOT.Y#[4]       (* diode or *)
 
 (* make OPCMUX.Y[] only 'L' when STATE_EX.Q & !IR[3] *)
 OPCMUX.G0#      <= STATE_EX#
@@ -302,7 +302,7 @@ AND4_1.C[0]     <= OPCODE_LD#
 AND4_1.D[0]     <= OPCODE_DJNZ#
 
 ACC_BANK_A#     <= IR[6]
-ACC_BANK_B#     <= !IR[6] ~ 'H'             (* mosfet inverter (2N7000) *)
+ACC_BANK_B#     <= !IR[6]                       (* mosfet inverter (2N7000) *)
 
 ACC_A[0].D      <= BUS[3:0]
 ACC_A[1].D      <= BUS[7:4]
@@ -310,7 +310,7 @@ ACC_A[*].E1#    <= AND4_1.Y[0]
 ACC_A[*].E2#    <= ACC_BANK_A#
 ACC_A[*].CP     <= WE#                          (* we can use the deactivation event of WE# for also writing the flip-flops *)
 ACC_A[*].OE#    <= ACC_BANK_A#
-ACC_A[*].OE2#   <= STATE_FI                 (* prevent glitching when fetching new state *)
+ACC_A[*].OE2#   <= STATE_FI                     (* prevent glitching when fetching new state *)
 
 ACC_B[0].D      <= BUS[3:0]
 ACC_B[1].D      <= BUS[7:4]
@@ -335,8 +335,8 @@ AND4_1.C[1]     <= OPCODE_ST#
 AND4_1.D[1]     <= 'H'
 
 MEM.CS#         <= AND4_1.Y[1]
-MEM.OE#         <= (AND2.Y[2]   | OE#) ~ R'L'   (* diode or for glitchless operation *)
-MEM.WE#         <= (OPCODE_ST#  | WE#) ~ R'L'   (* diode or for glitchless operation *)
+MEM.OE#         <= AND2.Y[2]   | OE#   (* diode or for glitchless operation *)
+MEM.WE#         <= OPCODE_ST#  | WE#   (* diode or for glitchless operation *)
 MEM.ADDR        <= OP
 
 ALUMUX[*].OE#   <= OPCODE_ALU#
@@ -363,12 +363,12 @@ EQ0.E#          <= 'L'
 NOT.A[6]        <= EQ0.Y#
 
 AND4_2.A[1]     <= OPCODE_JMP#
-AND4_2.B[1]     <= (OPCODE_JZ# | EQ0.Y#) ~ R'L'         (* diode or *)
-AND4_2.C[1]     <= (OPCODE_JNZ# | NOT.Y#[6]) ~ R'L'     (* diode or *)
-AND4_2.D[1]     <= (OPCODE_DJNZ# | NOT.Y#[6]) ~ R'L'    (* diode or *)
+AND4_2.B[1]     <= OPCODE_JZ# | EQ0.Y#              (* diode or *)
+AND4_2.C[1]     <= OPCODE_JNZ# | NOT.Y#[6]          (* diode or *)
+AND4_2.D[1]     <= OPCODE_DJNZ# | NOT.Y#[6]         (* diode or *)
 
 CODE.LABEL      <= OP[6:0]
-CODE.SEEK#      <= (AND4_2.Y[1] | WE#) ~ R'L'   (* diode or for glitchless operation *)
+CODE.SEEK#      <= AND4_2.Y[1] | WE#                (* diode or for glitchless operation *)
 CODE.HALT#      <= OPCODE_HALT#
 
 (* negedge(ADV) when (STATE_FF.Q[IO] | STATE_FF.Q[EX])) or posedge(CODE.STROBE) *)
@@ -392,7 +392,7 @@ TIM2.1R#        <= 'H'
 (* we use the TIM2.2 as a "edge inverter", which triggers with a really short pulse *)
 TIM2.2A#        <= ADV                                          (* trigger on negedge(ADV) *)
 TIM2.2B         <= 'H'
-TIM2.2R#        <= (STATE_FF.Q[IO] | STATE_FF.Q[EX]) ~ R'L'     (* diode or *)
+TIM2.2R#        <= STATE_FF.Q[IO] | STATE_FF.Q[EX]              (* diode or *)
 
 OE#             <= TIM1.1Q#                                     (* posedge(CLK),  negedge(ADV) when state in {IO,EX} *)
 WE#             <= TIM1.2Q#                                     (* posedge(CLK),  negedge(ADV) when state in {IO,EX} *)
