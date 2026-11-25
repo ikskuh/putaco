@@ -111,7 +111,7 @@ const Compiler = struct {
 
     pub fn compile(cc: *Compiler, gpa: std.mem.Allocator, parser: *Parser) !void {
         while (!parser.eof()) {
-            std.log.info("top level {?f}", .{parser.peek()});
+            // std.log.info("top level {?f}", .{parser.peek()});
             if (parser.try_take(.kw_component)) {
                 const intf = try parser.take_interface(cc.arena, .component);
 
@@ -133,7 +133,7 @@ const Compiler = struct {
                 const intf_ptr = try cc.arena.create(Interface);
                 intf_ptr.* = intf;
 
-                gop.value_ptr.* = try Instance.create(cc.arena, intf_ptr, null);
+                gop.value_ptr.* = try Instance.create(cc.arena, intf.name, intf_ptr, null);
             } else if (parser.try_take(.kw_instance)) {
                 const name = try parser.take(.identifier);
 
@@ -161,7 +161,7 @@ const Compiler = struct {
                 if (gop.found_existing) {
                     return cc.throw_error(parser, "duplicate instance: {f}", .{name});
                 }
-                gop.value_ptr.* = try Instance.create(cc.arena, intf, multiplicity);
+                gop.value_ptr.* = try Instance.create(cc.arena, name, intf, multiplicity);
             } else if (parser.try_take(.kw_wire)) {
                 const rref = try parser.take_rref();
                 if (cc.instances.get(rref.name) != null) {
@@ -239,7 +239,7 @@ const Compiler = struct {
         for (cc.instances.keys(), cc.instances.values()) |instance_name, instance| {
             for (instance.devices, 0..) |device, device_id| {
                 for (device.ports.keys(), device.ports.values()) |port_name, *port| {
-                    const driver_requirement = instance.get_pin_props(port);
+                    const driver_requirement = instance.get_pin_props(port).drive;
 
                     for (0..port.interface.width) |bit_index| {
                         const driven = port.assigned.isSet(bit_index);
@@ -330,7 +330,9 @@ const Compiler = struct {
         };
     }
 
-    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: enum { assignment, expression }) !u32 {
+    const UsageContext = enum { assignment, expression };
+
+    fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: UsageContext) !u32 {
         switch (ref) {
             .instance => |_iref| {
                 const iref, const sref = _iref;
@@ -380,24 +382,12 @@ const Compiler = struct {
                 switch (iref.access) {
                     .singleton, .broadcast => for (inst.devices) |*device| {
                         const dev_port = device.ports.getPtr(port.name).?;
-                        switch (context) {
-                            .assignment => {
-                                range.set_bits(&dev_port.assigned);
-                                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
-                            },
-                            .expression => range.set_bits(&dev_port.connected),
-                        }
+                        try cc.check_port_usage(inst, dev_port, range, context);
                     },
                     .indexed => |index| {
                         const idx = try index.resolve(&cc.constants);
                         const dev_port = inst.devices[idx].ports.getPtr(port.name).?;
-                        switch (context) {
-                            .assignment => {
-                                range.set_bits(&dev_port.assigned);
-                                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
-                            },
-                            .expression => range.set_bits(&dev_port.connected),
-                        }
+                        try cc.check_port_usage(inst, dev_port, range, context);
                     },
                 }
 
@@ -417,6 +407,37 @@ const Compiler = struct {
                 const range = try wref.get_range(&cc.constants, wire.width);
 
                 return range.width();
+            },
+        }
+    }
+
+    fn check_port_usage(cc: *Compiler, inst: *Instance, dev_port: *Instance.DevicePort, range: BitRange, context: UsageContext) !void {
+        _ = cc;
+
+        const props = inst.get_pin_props(dev_port);
+
+        switch (context) {
+            .assignment => {
+                for (range.low..range.high + 1) |i| {
+                    if (dev_port.assigned.isSet(i)) {
+                        std.log.err("{f}.{f}{f} has multiple assigned drivers", .{ inst.interface.name, dev_port.interface.name, range });
+                    }
+                }
+
+                range.set_bits(&dev_port.assigned);
+
+                range.set_bits(&dev_port.connected); // a pin is also connected when driven.
+
+                if (!props.interprets) {
+                    std.log.err("{f}.{f}{f} is not a suitable input signal", .{ inst.interface.name, dev_port.interface.name, range });
+                }
+            },
+            .expression => {
+                range.set_bits(&dev_port.connected);
+
+                if (!props.can_drive) {
+                    std.log.err("{f}.{f}{f} cannot drive other signals.", .{ inst.interface.name, dev_port.interface.name, range });
+                }
             },
         }
     }
@@ -442,16 +463,18 @@ const Port = struct {
 };
 
 const Instance = struct {
+    name: String,
     interface: *const Interface,
     multiplicity: ?u32,
 
     devices: []Device,
 
-    pub fn create(arena: std.mem.Allocator, interface: *const Interface, multiplicity: ?u32) !*Instance {
+    pub fn create(arena: std.mem.Allocator, name: String, interface: *const Interface, multiplicity: ?u32) !*Instance {
         const inst = try arena.create(Instance);
         errdefer arena.destroy(inst);
 
         inst.* = .{
+            .name = name,
             .interface = interface,
             .multiplicity = multiplicity,
             .devices = try arena.alloc(Device, multiplicity orelse 1),
@@ -486,20 +509,65 @@ const Instance = struct {
         should_have_driver,
     };
 
-    pub fn get_pin_props(instance: *const Instance, port: *const DevicePort) DriveProperties {
+    pub const PinProperties = struct {
+        /// The kind of drive this pin needs.
+        drive: DriveProperties,
+
+        /// If true, the pin interprets the voltage on that pin to some extend.
+        interprets: bool,
+
+        /// This pin can drive other signals.
+        can_drive: bool,
+    };
+
+    pub fn get_pin_props(instance: *const Instance, port: *const DevicePort) PinProperties {
         return switch (instance.interface.kind) {
             .component => switch (port.interface.dir) {
-                .out => .must_not_drive, // outputs must not have a driver
-                .in => .needs_driver, // component inputs must all have a driver assigned.
+                .out => .{
+                    .drive = .must_not_drive, // outputs must not have a driver
+                    .interprets = false,
+                    .can_drive = true,
+                },
+                .in => .{
+                    .drive = .needs_driver, // component inputs must all have a driver assigned.
+                    .interprets = true,
+                    .can_drive = false,
+                },
 
-                .inout => .should_have_driver, // Not every inout pin of a component needs to be treated as an input, but we should consider this
-                .tristate => .may_have_driver,
+                .inout => .{
+                    .drive = .should_have_driver, // Not every inout pin of a component needs to be treated as an input, but we should consider this
+                    .interprets = true,
+                    .can_drive = true,
+                },
+                .tristate => .{
+                    .drive = .may_have_driver,
+                    .interprets = false,
+                    .can_drive = true,
+                },
             },
             .port => switch (port.interface.dir) {
-                .out => .needs_driver, // outputs from our design always need a driver
-                .in => .must_not_drive, // inputs must never be driven.
+                .out => .{
+                    .drive = .needs_driver, // outputs from our design always need a driver
+                    .interprets = true,
+                    .can_drive = false,
+                },
+                .in => .{
+                    .drive = .must_not_drive, // inputs must never be driven, as they are driven externally.
+                    .interprets = false,
+                    .can_drive = true,
+                },
 
-                .inout, .tristate => .should_have_driver, // tri-state outputs should have a driver, as otherwise they could be inputs.
+                .inout => .{
+                    .drive = .should_have_driver, // tri-state outputs should have a driver, as otherwise they could be inputs.
+                    .interprets = true,
+                    .can_drive = true,
+                },
+
+                .tristate => .{
+                    .drive = .should_have_driver, // tri-state outputs should have a driver, as otherwise they could be inputs.
+                    .interprets = true,
+                    .can_drive = false,
+                },
             },
         };
     }
@@ -627,6 +695,14 @@ const BitRange = struct {
             .start = range.low,
             .end = range.high + 1,
         }, true);
+    }
+
+    pub fn format(range: BitRange, writer: *std.Io.Writer) !void {
+        if (range.low == range.high) {
+            try writer.print("[{d}]", .{range.low});
+        } else {
+            try writer.print("[{d}:{d}]", .{ range.high, range.low });
+        }
     }
 };
 
