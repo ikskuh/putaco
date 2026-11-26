@@ -14,6 +14,10 @@ port: MEM {
     output: WE#
 }
 
+port: AUX {
+    input: RESET
+}
+
 
 (*******************************************
  * Component Library                       *
@@ -149,7 +153,6 @@ instance: TIM2      = CD74HC221E
  * Interconnect                            *
  *******************************************)
 
-wire: RESET
 wire: STATE_FI
 wire: STATE_FO
 wire: STATE_IO
@@ -184,13 +187,11 @@ wire: WE#
 wire: CLK
 wire: ADV
 
-RESET           <= 'L' (* external signal *)
-
-IR_FF[*].MR     <= RESET
-OP_FF[*].MR     <= RESET
-ACC_A[*].MR     <= RESET
-ACC_B[*].MR     <= RESET
-STATE_FF.MR     <= RESET
+IR_FF[*].MR     <= AUX.RESET
+OP_FF[*].MR     <= AUX.RESET
+ACC_A[*].MR     <= AUX.RESET
+ACC_B[*].MR     <= AUX.RESET
+STATE_FF.MR     <= AUX.RESET
 
 NOT.OE1#        <= 'L'
 NOT.OE2#        <= 'L'
@@ -267,7 +268,7 @@ IR_FF[0].D      <= CODE.DATA[3:0]
 IR_FF[1].D      <= { 'L', CODE.DATA[6:4] }
 IR_FF[*].E1#    <= STATE_FI#
 IR_FF[*].E2#    <= 'L'
-IR_FF[*].CP     <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+IR_FF[*].CP     <= CLK                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
 IR_FF[*].OE#    <= 'L'
 IR_FF[*].OE2#   <= 'L'
 IR              <= { IR_FF[1].Q, IR_FF[0].Q }
@@ -286,7 +287,7 @@ OP_FF[0].D      <= OPDMUX[0].Y[3:0]
 OP_FF[1].D      <= OPDMUX[1].Y[3:0]
 OP_FF[*].E1#    <= AND2.Y[1]
 OP_FF[*].E2#    <= 'L'
-OP_FF[*].CP     <= WE#                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
+OP_FF[*].CP     <= CLK                          (* CODE.DATA is latched ~ 10 us after CODE.STROBE *)
 OP_FF[*].OE#    <= 'L'
 OP_FF[*].OE2#   <= 'L'
 
@@ -308,7 +309,7 @@ ACC_A[0].D      <= BUS[3:0]
 ACC_A[1].D      <= BUS[7:4]
 ACC_A[*].E1#    <= AND4_1.Y[0]
 ACC_A[*].E2#    <= ACC_BANK_A#
-ACC_A[*].CP     <= WE#                          (* we can use the deactivation event of WE# for also writing the flip-flops *)
+ACC_A[*].CP     <= CLK                          (* we can use the deactivation event of WE# for also writing the flip-flops *)
 ACC_A[*].OE#    <= ACC_BANK_A#
 ACC_A[*].OE2#   <= STATE_FI                     (* prevent glitching when fetching new state *)
 
@@ -316,7 +317,7 @@ ACC_B[0].D      <= BUS[3:0]
 ACC_B[1].D      <= BUS[7:4]
 ACC_B[*].E1#    <= AND4_1.Y[0]
 ACC_B[*].E2#    <= ACC_BANK_B#
-ACC_B[*].CP     <= WE#
+ACC_B[*].CP     <= CLK
 ACC_B[*].OE#    <= ACC_BANK_B#
 ACC_B[*].OE2#   <= STATE_FI                 (* prevent glitching when fetching new state *)
 

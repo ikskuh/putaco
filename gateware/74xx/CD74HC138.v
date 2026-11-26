@@ -7,16 +7,16 @@
 module CD74HC138 #(
     parameter real T_ADDRESS_NS = 13.0,
     parameter real T_ENABLE_NS = 13.0
-)(input [2:0] A, input G0_n, G1_n, G2, output [7:0] Y);
+)(input [2:0] A, input G0_n, G1_n, G2, output [7:0] Y_n);
     wire enabled = ~G0_n & ~G1_n & G2;
     genvar i;
     generate for (i = 0; i < 8; i = i + 1) begin: decode
-        assign Y[i] = ~(enabled & (A == i));
+        assign Y_n[i] = ~(enabled & (A == i));
     end endgenerate
     specify
-        (A *> Y) = (T_ADDRESS_NS, T_ADDRESS_NS);
-        (G0_n *> Y) = (T_ENABLE_NS, T_ENABLE_NS);
-        (G1_n *> Y) = (T_ENABLE_NS, T_ENABLE_NS);
-        (G2 *> Y) = (T_ENABLE_NS, T_ENABLE_NS);
+        (A *> Y_n) = (T_ADDRESS_NS, T_ADDRESS_NS);
+        (G0_n *> Y_n) = (T_ENABLE_NS, T_ENABLE_NS);
+        (G1_n *> Y_n) = (T_ENABLE_NS, T_ENABLE_NS);
+        (G2 *> Y_n) = (T_ENABLE_NS, T_ENABLE_NS);
     endspecify
 endmodule

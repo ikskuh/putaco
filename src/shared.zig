@@ -1,19 +1,23 @@
 const std = @import("std");
 
 const StringImpl = opaque {
-    fn to_slice(s: *const StringImpl) []const u8 {
-        const head: [*]const u8 = @ptrCast(s);
-
-        const len = std.mem.readInt(u32, head[0..4], .native);
-        return head[4..][0..len];
+    pub fn len(s: *align(4) const StringImpl) usize {
+        const l_ptr: *const u32 = @ptrCast(s);
+        return l_ptr.*;
     }
 
-    pub fn format(s: *const StringImpl, writer: *std.Io.Writer) !void {
+    pub fn to_slice(s: *align(4) const StringImpl) []const u8 {
+        const _len = s.len();
+        const head: [*]const u8 = @ptrCast(s);
+        return head[4..][0.._len];
+    }
+
+    pub fn format(s: *align(4) const StringImpl, writer: *std.Io.Writer) !void {
         try writer.print("\"{f}\"", .{std.zig.fmtString(s.to_slice())});
     }
 };
 
-pub const String = *const StringImpl;
+pub const String = *align(4) const StringImpl;
 
 pub const StringPool = struct {
     gpa: std.mem.Allocator,

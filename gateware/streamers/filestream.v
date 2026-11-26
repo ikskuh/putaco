@@ -33,26 +33,24 @@ module FileStream #(
             $finish;
         end
 
-        #1000; // startup delay
+        #10000; // 10 us startup delay
 
-        for (loops = 0; loops < MAX_LOOPS && !halted; loops ++) begin
-            while (!halted) begin
-                bytes_read = $fread( code_byte, code_fd);
-                if(bytes_read == 0) begin
-                    $rewind(code_fd);
-                    break;
-                end
-
-                $display("read %d bytes: %02x, %d", bytes_read, code_byte[0], $time);
-
-                c_data <= code_byte[0];
-                c_strobe <= 1;
-
-                #STROBE_LENGTH;
-                c_strobe <= 0;
-
-                #(STROBE_PERIOD - STROBE_LENGTH);
+        while (1) begin
+            bytes_read = $fread( code_byte, code_fd);
+            if(bytes_read == 0) begin
+                $rewind(code_fd);
+                continue;
             end
+
+            $display("read %d bytes: %02x, %d", bytes_read, code_byte[0], $time);
+
+            c_data <= code_byte[0];
+            c_strobe <= 1;
+
+            #STROBE_LENGTH;
+            c_strobe <= 0;
+
+            #(STROBE_PERIOD - STROBE_LENGTH);
         end
 
         #1000;

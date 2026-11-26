@@ -9,8 +9,14 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
 
+    const argv = try init.minimal.args.toSlice(arena);
+
     var strings: StringPool = .init(arena);
     defer strings.deinit();
+
+    if (argv.len > 1) {
+        try PatchSet.load(init.io, arena, &strings, argv[1]);
+    }
 
     const source: SourceFile = blk: {
         var writer: std.Io.Writer.Allocating = .init(arena);
@@ -46,7 +52,324 @@ pub fn main(init: std.process.Init) !u8 {
     std.log.info("resistors:        {d: >3}", .{compiler.stats.resistors});
     std.log.info("inverters:        {d: >3}", .{compiler.stats.inverters});
 
+    {
+        var buffer: [8192]u8 = undefined;
+
+        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+
+        try render_verilog(&writer.interface, &compiler);
+
+        try writer.flush();
+    }
+
     return 0;
+}
+
+fn render_verilog(writer: *std.Io.Writer, compiler: *const Compiler) !void {
+    try writer.writeAll(
+        \\/**************************************************
+        \\* THIS FILE IS GENERATED. MODIFICATION IS FUTILE! *
+        \\**************************************************/
+        \\
+        \\
+    );
+    try writer.writeAll("`timescale 1ns / 1ps;\n");
+    try writer.writeAll("\n");
+    try writer.writeAll("module PutacoCore(\n");
+
+    // TODO: Render ports
+
+    var first = true;
+    for (compiler.instances.values()) |inst| {
+        if (inst.interface.kind != .port)
+            continue;
+
+        std.debug.assert(inst.devices.len == 1);
+
+        for (inst.interface.ports.keys(), inst.interface.ports.values()) |name, port| {
+            if (first) {
+                try writer.writeAll("    ");
+                first = false;
+            } else {
+                try writer.writeAll(",\n    ");
+            }
+            try writer.print("{s}", .{switch (port.dir) {
+                .in => "input ",
+                .out => "output",
+                .inout => "inout ",
+                .tristate => "output", // verilog uses HLZ here
+            }});
+
+            if (port.width) |width| {
+                try writer.print(" [{d}:0]", .{width - 1});
+            } else {
+                try writer.writeAll("      ");
+            }
+
+            try writer.print(" {f}_{f}", .{
+                fmt_verilog(inst.name),
+                fmt_verilog(name),
+            });
+        }
+    }
+
+    try writer.writeAll("\n);\n");
+
+    // write global symbols
+    try writer.writeAll("    supply0 GND;\n");
+    try writer.writeAll("    supply1 VCC;\n");
+    try writer.writeAll("\n");
+
+    // write localparams
+    if (compiler.constants.count() > 0) {
+        try write_verilog_header(writer, "Constants");
+        for (compiler.constants.keys(), compiler.constants.values()) |name, c| {
+            try writer.print("    localparam {f} = {d};\n", .{ fmt_verilog(name), c });
+        }
+        try writer.writeAll("\n");
+    }
+
+    // write component instances
+
+    if (compiler.instances.count() > 0) {
+        try write_verilog_header(writer, "Instances");
+        for (compiler.instances.values()) |inst| {
+            if (inst.interface.kind != .component)
+                continue;
+
+            std.debug.assert(inst.devices.len >= 1);
+
+            for (inst.devices, 0..) |device, device_id| {
+                _ = device;
+                try writer.print("    {f}", .{
+                    fmt_verilog(PatchSet.get_component_name(inst.interface.name)),
+                });
+
+                const params = PatchSet.get_parameters(inst.name);
+                if (params.count() > 0) {
+                    try writer.writeAll(" #(\n");
+
+                    for (params.keys(), params.values(), 0..) |key, value, index| {
+                        try writer.print("        .{s}({s}){s}\n", .{
+                            key.to_slice(),
+                            value.to_slice(),
+                            if (index == params.count() - 1)
+                                ""
+                            else
+                                ",",
+                        });
+                    }
+
+                    try writer.writeAll("    )");
+                }
+
+                try writer.print(" {f}();", .{
+                    fmt_verilog_instance(inst, device_id),
+                });
+                if (inst.multiplicity != null) {
+                    try writer.print(" // {s}[{d}]", .{ inst.name.to_slice(), device_id });
+                } else {
+                    try writer.print(" // {s}", .{inst.name.to_slice()});
+                }
+
+                try writer.writeAll("\n");
+            }
+        }
+        try writer.writeAll("\n");
+    }
+
+    if (compiler.wires.count() > 0) {
+        try write_verilog_header(writer, "Wires");
+
+        for (compiler.wires.keys(), compiler.wires.values()) |wire_name, wire| {
+            if (wire.width) |width| {
+                try writer.print("    wire [{d}:0] {f};", .{ width - 1, fmt_verilog(wire_name) });
+            } else {
+                try writer.print("    wire       {f};", .{fmt_verilog(wire_name)});
+            }
+            try writer.print(" // {s}\n", .{wire_name.to_slice()});
+        }
+
+        try writer.writeAll("\n");
+    }
+
+    if (compiler.assignments.items.len > 0) {
+        try write_verilog_header(writer, "Assignments");
+
+        for (compiler.assignments.items) |ass| {
+            switch (ass.target) {
+                .wire => |ref| {
+                    try writer.print("    assign {f} = ", .{
+                        fmt_verilog_wire(compiler, ref),
+                    });
+
+                    try write_verilog_expr(writer, compiler, ass.source);
+
+                    try writer.writeAll(";\n");
+                },
+                .instance => |ref| {
+                    var iter: InstanceIter = .init(compiler, ref.inst);
+
+                    while (iter.next()) |_pack| {
+                        const inst, const index = _pack;
+
+                        try writer.writeAll("    assign ");
+                        try writer.print("{f}{c}{f}", .{
+                            fmt_verilog_instance(inst, index),
+                            @as(u7, switch (inst.interface.kind) {
+                                .port => '_',
+                                .component => '.',
+                            }),
+                            fmt_verilog_signal(compiler, inst, ref.signal),
+                        });
+                        try writer.writeAll(" = ");
+
+                        try write_verilog_expr(writer, compiler, ass.source);
+
+                        try writer.writeAll(";\n");
+                    }
+                },
+            }
+        }
+
+        try writer.writeAll("\n");
+    }
+
+    try writer.writeAll("endmodule\n");
+
+    //
+}
+
+fn write_verilog_expr(writer: *std.Io.Writer, cc: *const Compiler, expr: *const Expression) !void {
+    switch (expr.*) {
+        .hardwired => |value| {
+            if (value.width == 1) {
+                try writer.writeAll(if (value.bits.isSet(0))
+                    "VCC"
+                else
+                    "GND");
+            } else {
+                try writer.print("{}'b", .{value.width});
+                for (0..value.width) |i| {
+                    try writer.print("{d}", .{@intFromBool(value.bits.isSet(value.width - i - 1))});
+                }
+            }
+        },
+        .resistors => |value| {
+            // TODO: Properly implement resistors.
+            try writer.print("{}'b", .{value.width});
+            for (0..value.width) |i| {
+                try writer.print("{d}", .{@intFromBool(value.bits.isSet(value.width - i - 1))});
+            }
+        },
+        .reference => |value| {
+            switch (value) {
+                .wire => |ref| {
+                    try writer.print("{f}", .{
+                        fmt_verilog_wire(cc, ref),
+                    });
+                },
+
+                .instance => |ref| {
+                    const inst: *const Instance = cc.instances.get(ref.inst.name).?;
+
+                    const inst_index = switch (ref.inst.access) {
+                        .singleton => 0,
+                        .broadcast => unreachable,
+                        .indexed => |idx| try idx.resolve(&cc.constants),
+                    };
+                    try writer.print("{f}{c}{f}", .{
+                        fmt_verilog_instance(inst, inst_index),
+                        @as(u7, switch (inst.interface.kind) {
+                            .port => '_',
+                            .component => '.',
+                        }),
+                        fmt_verilog_signal(cc, inst, ref.signal),
+                    });
+                },
+            }
+        },
+        .concat => |value| {
+            try writer.writeAll("{ ");
+            for (value, 0..) |*item, i| {
+                if (i > 0) {
+                    try writer.writeAll(", ");
+                }
+                try write_verilog_expr(writer, cc, item);
+            }
+            try writer.writeAll(" }");
+        },
+        .joined => |value| {
+            _ = value; // TODO: Implement writing joined busses.
+            try writer.writeAll("(0 /* TODO: joined */)");
+        },
+        .diode_or => |value| {
+            try writer.writeAll("(");
+            for (value, 0..) |*item, i| {
+                if (i > 0) {
+                    try writer.writeAll(" | ");
+                }
+                try write_verilog_expr(writer, cc, item);
+            }
+            try writer.writeAll(")");
+        },
+        .diode_and => |value| {
+            try writer.writeAll("(");
+            for (value, 0..) |*item, i| {
+                if (i > 0) {
+                    try writer.writeAll(" & ");
+                }
+                try write_verilog_expr(writer, cc, item);
+            }
+            try writer.writeAll(")");
+        },
+        .inverted => |value| {
+            try writer.writeAll("!(");
+            try write_verilog_expr(writer, cc, value);
+            try writer.writeAll(")");
+        },
+    }
+}
+
+const InstanceIter = struct {
+    inst: *const Instance,
+    range: BitRange,
+    pos: u32,
+
+    pub fn init(compiler: *const Compiler, ref: InstanceRef) InstanceIter {
+        const inst: *const Instance = compiler.instances.get(ref.name).?;
+
+        const range: BitRange = switch (ref.access) {
+            .singleton => .single(0),
+            .indexed => |index| .single(index.resolve(&compiler.constants) catch unreachable),
+            .broadcast => .range(0, inst.multiplicity.? - 1),
+        };
+
+        return InstanceIter{
+            .inst = inst,
+            .range = range,
+            .pos = range.low,
+        };
+    }
+
+    pub fn next(iter: *InstanceIter) ?struct { *const Instance, u32 } {
+        if (iter.pos > iter.range.high)
+            return null;
+
+        const curr = iter.pos;
+        iter.pos += 1;
+        return .{ iter.inst, curr };
+    }
+};
+
+fn write_verilog_header(writer: *std.Io.Writer, text: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+
+    try writer.writeAll("    /**\n");
+    while (lines.next()) |line| {
+        try writer.print("      * {s}\n", .{std.mem.trimEnd(u8, line, " \r\n\t")});
+    }
+    try writer.writeAll("     */\n");
 }
 
 const SourceFile = struct {
@@ -155,7 +478,7 @@ const Compiler = struct {
                 gop.value_ptr.* = try Instance.create(cc.arena, intf.name, intf_ptr, null);
 
                 for (intf.ports.values()) |port| {
-                    cc.stats.external_pins += port.width;
+                    cc.stats.external_pins += (port.width orelse 1);
                 }
             } else if (parser.try_take(.kw_instance)) {
                 const name = try parser.take(.identifier);
@@ -190,7 +513,7 @@ const Compiler = struct {
                     intf.used = true;
                     cc.stats.components += 1;
                     for (intf.ports.values()) |port| {
-                        cc.stats.internal_pins += port.width;
+                        cc.stats.internal_pins += (port.width orelse 1);
                     }
                 }
 
@@ -208,7 +531,7 @@ const Compiler = struct {
                 gop.value_ptr.* = .{
                     .name = rref.name,
                     .width = switch (rref.access) {
-                        .full => 1,
+                        .full => null,
                         .index, .broadcast => return error.SyntaxError,
                         .range => |r| r.width(),
                     },
@@ -265,7 +588,8 @@ const Compiler = struct {
         switch (ref) {
             .wire => std.log.err("cannot mark wire as unused", .{}),
             .instance => |_instance| {
-                const iref, const sref = _instance;
+                const iref = _instance.inst;
+                const sref = _instance.signal;
 
                 const inst: *Instance = cc.instances.get(iref.name) orelse {
                     return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
@@ -339,7 +663,7 @@ const Compiler = struct {
         for (cc.instances.keys(), cc.instances.values()) |instance_name, instance| {
             for (instance.devices, 0..) |device, device_id| {
                 for (device.ports.keys(), device.ports.values()) |port_name, *port| {
-                    for (0..port.interface.width) |bit_index| {
+                    for (0..port.interface.width orelse 1) |bit_index| {
                         const connected = port.connected.isSet(bit_index);
                         const unconnected = port.unconnected.isSet(bit_index);
                         if (!connected and !unconnected) {
@@ -360,7 +684,7 @@ const Compiler = struct {
                 for (device.ports.keys(), device.ports.values()) |port_name, *port| {
                     const driver_requirement = instance.get_pin_props(port).drive;
 
-                    for (0..port.interface.width) |bit_index| {
+                    for (0..port.interface.width orelse 1) |bit_index| {
                         const driven = port.assigned.isSet(bit_index);
 
                         switch (driver_requirement) {
@@ -478,7 +802,8 @@ const Compiler = struct {
     fn validate_ref(cc: *Compiler, parser: *Parser, ref: Reference, context: UsageContext, bus_joined: bool) !u32 {
         switch (ref) {
             .instance => |_iref| {
-                const iref, const sref = _iref;
+                const iref = _iref.inst;
+                const sref = _iref.signal;
 
                 const inst: *Instance = cc.instances.get(iref.name) orelse {
                     return cc.throw_error(parser, "undeclared instance {f}", .{iref.name});
@@ -633,7 +958,7 @@ const Interface = struct {
 
 const Port = struct {
     name: String,
-    width: u32,
+    width: ?u32,
     dir: Direction,
 };
 
@@ -769,7 +1094,7 @@ const Instance = struct {
 
 const Wire = struct {
     name: String,
-    width: u32,
+    width: ?u32,
 };
 
 const Direction = enum {
@@ -841,6 +1166,9 @@ const Logic = struct {
 
 const ConstMap = std.AutoArrayHashMapUnmanaged(String, u32);
 
+/// An index into a bus or array, which can use either a numeric
+/// or indirect value.
+/// Must be resolved against a set of constants.
 const Index = union(enum) {
     numeric: u32,
     named: String,
@@ -860,51 +1188,69 @@ const BitRange = struct {
     low: u32, // inclusive
     high: u32, // inclusive
 
+    pub fn single(index: u32) BitRange {
+        return .{ .low = index, .high = index };
+    }
+
+    pub fn range(low: u32, high: u32) BitRange {
+        std.debug.assert(low <= high);
+        return .{ .low = low, .high = high };
+    }
+
     pub fn width(r: BitRange) u32 {
         return r.high - r.low + 1;
     }
 
-    pub fn is_valid_for_width(range: BitRange, w: u32) bool {
-        return range.low < w and range.high < w;
+    pub fn is_valid_for_width(r: BitRange, w: u32) bool {
+        return r.low < w and r.high < w;
     }
 
-    pub fn set_bits(range: BitRange, set: *std.bit_set.Integer(64)) void {
+    pub fn set_bits(r: BitRange, set: *std.bit_set.Integer(64)) void {
         set.setRangeValue(.{
-            .start = range.low,
-            .end = range.high + 1,
+            .start = r.low,
+            .end = r.high + 1,
         }, true);
     }
 
-    pub fn format(range: BitRange, writer: *std.Io.Writer) !void {
-        if (range.low == range.high) {
-            try writer.print("[{d}]", .{range.low});
+    pub fn format(r: BitRange, writer: *std.Io.Writer) !void {
+        if (r.low == r.high) {
+            try writer.print("[{d}]", .{r.low});
         } else {
-            try writer.print("[{d}:{d}]", .{ range.high, range.low });
+            try writer.print("[{d}:{d}]", .{ r.high, r.low });
         }
     }
 };
 
 const Reference = union(enum) {
     wire: SignalRef,
-    instance: struct { InstanceRef, SignalRef },
+    instance: InstanceSignalRef,
+};
+
+const InstanceSignalRef = struct {
+    inst: InstanceRef,
+    signal: SignalRef,
+};
+
+const InstanceAccess = union(enum) {
+    singleton,
+    indexed: Index,
+    broadcast,
 };
 
 const InstanceRef = struct {
     name: String,
-    access: union(enum) {
-        singleton,
-        indexed: Index,
-        broadcast,
-    },
+    access: InstanceAccess,
+};
+
+const SignalAccess = union(enum) {
+    full,
+    index: Index,
+    range: BitRange,
 };
 
 const SignalRef = struct {
     name: String,
-    access: union(enum) {
-        full,
-        index: Index,
-        range: BitRange,
-    },
+    access: SignalAccess,
 
     pub fn get_width(ref: SignalRef, port_width: u32) !u32 {
         return switch (ref.access) {
@@ -914,22 +1260,38 @@ const SignalRef = struct {
         };
     }
 
-    pub fn get_range(ref: SignalRef, consts: *const ConstMap, width: u32) !BitRange {
+    pub fn get_range(ref: SignalRef, consts: *const ConstMap, width: ?u32) error{ InvalidAccess, OutOfRange, ConstNotFound }!BitRange {
         return switch (ref.access) {
-            .full => .{ .low = 0, .high = width - 1 },
+            .full => if (width) |w|
+                .range(0, w - 1)
+            else
+                .single(0),
+
             .index => |index| blk: {
+                const w = width orelse return error.InvalidAccess;
                 const i = try index.resolve(consts);
-                break :blk .{ .low = i, .high = i };
+                if (i >= w)
+                    return error.OutOfRange;
+                break :blk .single(i);
             },
-            .range => |r| r,
+            .range => |r| if (width != null)
+                r
+            else
+                return error.InvalidAccess,
         };
     }
 
-    pub fn is_valid_for_width(ref: SignalRef, consts: *const ConstMap, width: u32) !bool {
+    pub fn is_valid_for_width(ref: SignalRef, consts: *const ConstMap, width: ?u32) !bool {
         return switch (ref.access) {
             .full => true,
-            .index => |i| return (try i.resolve(consts)) < width,
-            .range => |r| return r.is_valid_for_width(width),
+            .index => |i| if (width) |w|
+                return (try i.resolve(consts)) < w
+            else
+                false,
+            .range => |r| if (width) |w|
+                return r.is_valid_for_width(w)
+            else
+                false, // cannot use ranged access on signals without width.
         };
     }
 };
@@ -1018,8 +1380,8 @@ const Parser = struct {
 
         return .{
             .instance = .{
-                try rref_head.to_instance_ref(),
-                try rref_tail.to_signal_ref(),
+                .inst = try rref_head.to_instance_ref(),
+                .signal = try rref_tail.to_signal_ref(),
             },
         };
     }
@@ -1097,7 +1459,7 @@ const Parser = struct {
                 .dir = dir,
                 .name = rref.name,
                 .width = switch (rref.access) {
-                    .full => 1,
+                    .full => null,
                     .range => |r| r.width(),
                     .index, .broadcast => return error.InvalidNet,
                 },
@@ -1517,5 +1879,215 @@ const Token = union(enum) {
                 try writer.print("Token({t})", .{t});
             },
         }
+    }
+};
+
+fn fmt_verilog(str: String) FmtVerilog {
+    return .{ .str = str };
+}
+
+fn fmt_verilog_instance(inst: *const Instance, index: usize) FmtVerilogInstance {
+    if (index >= inst.devices.len) {
+        std.log.err("{f}: {}/{}", .{ inst.name, index, inst.devices.len });
+    }
+    std.debug.assert(index < inst.devices.len);
+    if (inst.multiplicity == null) {
+        std.debug.assert(index == 0);
+    } else {
+        std.debug.assert(inst.multiplicity.? > 1);
+    }
+    return .{ .inst = inst, .index = index };
+}
+
+fn fmt_verilog_signal(cc: *const Compiler, instance: *const Instance, sref: SignalRef) FmtVerilogSignal {
+    const width = instance.devices[0].ports.get(sref.name).?.interface.width;
+
+    return .{
+        .name = PatchSet.get_port_name(instance.interface.name, sref.name),
+        .range = if (width) |w|
+            sref.get_range(&cc.constants, w) catch unreachable
+        else
+            null,
+    };
+}
+
+fn fmt_verilog_wire(cc: *const Compiler, sref: SignalRef) FmtVerilogSignal {
+    const width = cc.wires.getPtr(sref.name).?.width;
+
+    return .{
+        .name = sref.name,
+        .range = if (width) |w|
+            sref.get_range(&cc.constants, w) catch unreachable
+        else
+            null,
+    };
+}
+
+const FmtVerilogSignal = struct {
+    name: String,
+    range: ?BitRange,
+
+    pub fn format(fmt: FmtVerilogSignal, writer: *std.Io.Writer) !void {
+        if (fmt.range) |range| {
+            try writer.print("{f}{f}", .{
+                fmt_verilog(fmt.name),
+                range,
+            });
+        } else {
+            try writer.print("{f}", .{fmt_verilog(fmt.name)});
+        }
+    }
+};
+
+const FmtVerilogInstance = struct {
+    inst: *const Instance,
+    index: usize,
+
+    pub fn format(fmt: FmtVerilogInstance, writer: *std.Io.Writer) !void {
+        try writer.print("{f}", .{fmt_verilog(fmt.inst.name)});
+
+        if (fmt.inst.multiplicity != null) {
+            try writer.print("_i{d}", .{fmt.index});
+        }
+    }
+};
+
+const FmtVerilog = struct {
+    str: String,
+
+    pub fn format(fmt: FmtVerilog, writer: *std.Io.Writer) !void {
+        const slice = fmt.str.to_slice();
+
+        const is_slash_inverted = std.mem.startsWith(u8, slice, "/");
+        const is_hash_inverted = std.mem.endsWith(u8, slice, "#");
+        const is_inverted = is_slash_inverted or is_hash_inverted;
+
+        const core_name = if (is_slash_inverted)
+            slice[1..]
+        else if (is_hash_inverted)
+            slice[0 .. slice.len - 1]
+        else
+            slice;
+
+        for (core_name, 0..) |c, i| {
+            switch (c) {
+                'A'...'Z',
+                'a'...'z',
+                '_',
+                => try writer.writeByte(c),
+                '0'...'9' => {
+                    if (i == 0) {
+                        try writer.writeAll("_");
+                    }
+                    try writer.writeByte(c);
+                },
+
+                '-' => try writer.writeByte('_'),
+
+                else => try writer.print("x{X:0>2}", .{c}),
+            }
+        }
+
+        if (is_inverted)
+            try writer.writeAll("_n");
+    }
+};
+
+const PatchSet = struct {
+    const StringMap = std.AutoArrayHashMapUnmanaged(String, String);
+
+    const ComponentPatches = struct {
+        ports: StringMap,
+
+        fn from_json(arena: std.mem.Allocator, strings: *StringPool, jmap: std.json.Value) !ComponentPatches {
+            const obj = try std.json.parseFromValueLeaky(struct {
+                ports: std.json.Value,
+            }, arena, jmap, .{});
+
+            return .{
+                .ports = try load_string_map(arena, strings, obj.ports, String),
+            };
+        }
+    };
+
+    const InstancePatches = struct {
+        parameters: StringMap,
+
+        fn from_json(arena: std.mem.Allocator, strings: *StringPool, jmap: std.json.Value) !InstancePatches {
+            const obj = try std.json.parseFromValueLeaky(struct {
+                parameters: std.json.Value,
+            }, arena, jmap, .{});
+
+            return .{
+                .parameters = try load_string_map(arena, strings, obj.parameters, String),
+            };
+        }
+    };
+
+    pub var component_names: StringMap = .empty;
+
+    pub var components: std.AutoArrayHashMapUnmanaged(String, ComponentPatches) = .empty;
+
+    pub var instances: std.AutoArrayHashMapUnmanaged(String, InstancePatches) = .empty;
+
+    pub fn load(io: std.Io, arena: std.mem.Allocator, strings: *StringPool, path: []const u8) !void {
+        const j_source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
+
+        const JRoot = struct {
+            component_names: std.json.Value,
+
+            components: std.json.Value,
+            instances: std.json.Value,
+        };
+
+        const root = try std.json.parseFromSliceLeaky(JRoot, arena, j_source, .{});
+
+        component_names = try load_string_map(arena, strings, root.component_names, String);
+
+        components = try load_string_map(arena, strings, root.components, ComponentPatches);
+        instances = try load_string_map(arena, strings, root.instances, InstancePatches);
+    }
+
+    fn load_string_map(arena: std.mem.Allocator, strings: *StringPool, jmap: std.json.Value, comptime Value: type) !std.AutoArrayHashMapUnmanaged(String, Value) {
+        if (jmap != .object)
+            return error.TypeError;
+        const object = &jmap.object;
+
+        var map: std.AutoArrayHashMapUnmanaged(String, Value) = .empty;
+
+        try map.ensureTotalCapacity(arena, object.count());
+
+        for (object.keys(), object.values()) |key, jvalue| {
+            const key_id = try strings.get_or_put(key);
+
+            const value = switch (Value) {
+                String => blk: {
+                    if (jvalue != .string)
+                        return error.TypeError;
+                    break :blk try strings.get_or_put(jvalue.string);
+                },
+                else => try Value.from_json(arena, strings, jvalue),
+            };
+
+            map.putAssumeCapacityNoClobber(key_id, value);
+        }
+
+        return map;
+    }
+
+    pub fn get_component_name(input: String) String {
+        return component_names.get(input) orelse input;
+    }
+
+    pub fn get_port_name(component_name: String, port_name: String) String {
+        const patchset = components.get(component_name) orelse return port_name;
+
+        return patchset.ports.get(port_name) orelse port_name;
+    }
+
+    pub fn get_parameters(instance_name: String) StringMap {
+        const patchset = instances.get(instance_name) orelse return .empty;
+
+        return patchset.parameters;
     }
 };

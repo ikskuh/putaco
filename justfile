@@ -1,8 +1,10 @@
 # Generate the ALU table and run the bare Verilog testbench with Icarus Verilog.
-testbench:
+testbench: gen-netlist
     zig-0.17.1 build
     mkdir -p zig-out/gateware
-    iverilog -g2012 -Wall \
+    iverilog -g2012 \
+        -Wall \
+        -Wno-portbind  \
         -s testbench \
         -o zig-out/gateware/testbench \
         gateware/testbench.v \
@@ -48,4 +50,5 @@ test-hello:
 
 gen-netlist:
     zig build -freference-trace=8 --error-style minimal --summary none
-    ./zig-out/bin/hwcomp < hardware/netlist.hw
+    ./zig-out/bin/hwcomp < hardware/netlist.hw gateware/netlist-patches.json \
+        | tee  gateware/PutacoCore.v

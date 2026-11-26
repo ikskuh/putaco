@@ -2,6 +2,8 @@
 
 module testbench;
 
+    reg        reset;
+
     wire [6:0] c_data;
     wire [6:0] c_label;
     wire       c_strobe;
@@ -10,30 +12,31 @@ module testbench;
 
     wire [7:0] mem_addr;
     wire [7:0] mem_data;
-    wire       mem_cs;
-    wire       mem_oe;
-    wire       mem_we;
+    wire       mem_cs_n;
+    wire       mem_oe_n;
+    wire       mem_we_n;
 
     PutacoCore dut(
-        .c_data(c_data),
-        .c_strobe(c_strobe),
-        .c_label(c_label),
-        .c_seek_n(c_seek_n),
-        .c_halt_n(c_halt_n),
-        .mem_addr(mem_addr),
-        .mem_data(mem_data),
-        .mem_cs(mem_cs),
-        .mem_oe(mem_oe),
-        .mem_we(mem_we)
+        .CODE_DATA(c_data),
+        .CODE_STROBE(c_strobe),
+        .CODE_LABEL(c_label),
+        .CODE_SEEK_n(c_seek_n),
+        .CODE_HALT_n(c_halt_n),
+        .MEM_ADDR(mem_addr),
+        .MEM_DATA(mem_data),
+        .MEM_CS_n(mem_cs_n),
+        .MEM_OE_n(mem_oe_n),
+        .MEM_WE_n(mem_we_n),
+        .AUX_RESET(reset)
     );
 
     AS6C1008 sram(
         .A({ 9'b0, mem_addr}),
         .DQ(mem_data),
-        .CE_n(mem_cs),
+        .CE_n(mem_cs_n),
         .CE2(1'b1),
-        .OE_n(mem_oe),
-        .WE_n(mem_we)
+        .OE_n(mem_oe_n),
+        .WE_n(mem_we_n)
     );
 
     wire [7:0] c_raw_data;
@@ -66,13 +69,24 @@ module testbench;
     initial begin
         $dumpfile("zig-out/gateware/testbench.vcd");
         $dumpvars(0, testbench);
-        
 
-        while (c_halt_n) begin 
-            #10;
-        end
+        reset <= 1;
+
+        # 100; // time for initialization
+
+        reset <= 0;
+
+        # 100; // time for settling/init
+        
+        wait (c_halt_n === 1'b0);
+        
+        # 1000; // time for "aftermath"
 
         $display("Testbench completed");
         $finish;
+    end
+    initial begin
+        #1000000;
+        $fatal(1, "Simulation timeout: CPU did not halt");
     end
 endmodule

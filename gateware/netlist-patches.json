@@ -1,0 +1,49 @@
+{
+    "component_names": {
+        "SST39SF040-70-4C-NHE": "SST39SF040",
+        "CD74HC173E": "CD74HC173",
+        "CD74HC541E": "CD74HC541",
+        "CD74HC221E": "CD74HC221"
+    },
+    "components": {
+        "SN74HC157": {
+            "ports": {
+                "A#/B": "S"
+            }
+        },
+        "CD74HC173E": {
+            "ports": {
+                "OE#": "OE1_n"
+            }
+        },
+        "CD74HC541E": {
+            "ports": {
+                "OE#": "OE1_n"
+            }
+        }
+    },
+    "instances": {
+        "ALU": {
+            "parameters": {
+                "INIT_FILE": "\"zig-out/aux/alu.bin\"",
+                "INIT_FORMAT": "\"raw\""
+            }
+        },
+        "TIM1": {
+            "parameters": {
+                "RX1_OHMS": "3000",
+                "CX1_PF": "4700",
+                "RX2_OHMS": "3000",
+                "CX2_PF": "4700"
+            }
+        },
+        "TIM2": {
+            "parameters": {
+                "RX1_OHMS": "3000",
+                "CX1_PF": "4700",
+                "RX2_OHMS": "3000",
+                "CX2_PF": "4700"
+            }
+        }
+    }
+}

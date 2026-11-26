@@ -35,10 +35,37 @@ module CD74HC221 #(
     parameter real T_RESET_WIDTH_NS = 14.0,
     parameter real T_RECOVERY_NS = 0.0
 )(
-    input [1:0] A_n, B, R_n,
-    output reg [1:0] Q = 2'b00,
-    output reg [1:0] Q_n = 2'b11
+    input  _1A_n,
+    input  _1B,
+    input  _1R_n,
+    output _1Q,
+    output _1Q_n,
+    input  _2A_n,
+    input  _2B,
+    input  _2R_n,
+    output _2Q,
+    output _2Q_n
 );
+
+    wire [1:0] A_n;
+    wire [1:0] B;
+    wire [1:0] R_n;
+
+    assign A_n[0] = _1A_n;
+    assign A_n[1] = _2A_n;
+    assign B[0]   = _1B;
+    assign B[1]   = _2B;
+    assign R_n[0] = _1R_n;
+    assign R_n[1] = _2R_n;
+
+    reg [1:0] Q = 2'b00;
+    reg [1:0] Q_n = 2'b11;
+
+    assign _1Q = Q[0];
+    assign _1Q_n = Q_n[0];
+    assign _2Q = Q[1];
+    assign _2Q_n = Q_n[1];
+
     genvar i;
     generate for (i = 0; i < 2; i = i + 1) begin: channel
         localparam real RX = (i == 0) ? RX1_OHMS : RX2_OHMS;
