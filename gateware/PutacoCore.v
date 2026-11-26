@@ -58,7 +58,7 @@ module PutacoCore(
     SN74HC540 NOT(); // NOT
     CD74HC688 EQ0(); // EQ0
     CD74HC221 #(
-        .RX1_OHMS(3000),
+        .RX1_OHMS(6000),
         .CX1_PF(4700),
         .RX2_OHMS(3000),
         .CX2_PF(4700)

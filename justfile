@@ -2,7 +2,9 @@
 testbench: gen-netlist
     zig-0.17.1 build
     mkdir -p zig-out/gateware
-    iverilog -g2012 \
+    iverilog \
+        -g2012 \
+        -gspecify \
         -Wall \
         -Wno-portbind  \
         -s testbench \
